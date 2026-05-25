@@ -6,7 +6,7 @@ const path = require('path');
 // 1. КОНФИГУРАЦИЯ
 // ==========================================
 const CONFIG = {
-  BOT_TOKEN: '8859814892:AAGxvOy7nBRYPPv8mHEEJ4ZJLQ2JvJKq5kY',
+  BOT_TOKEN: '8530248644:AAHPg98XFrHtz0_ZDilhtIfPJYq7W6lLlDg',
   ADMIN_IDS: [7295281658, 5137860558],
   DB_PATH: './data.json',
   PIARFLOW_API_KEY: '-Fw-JokBjo-mmNfQsDyt82ZsKUXzSkE7',
