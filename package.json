@@ -1,0 +1,24 @@
+{
+  "name": "newref",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sendox2012-debug/tg-ref-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/sendox2012-debug/tg-ref-bot/issues"
+  },
+  "homepage": "https://github.com/sendox2012-debug/tg-ref-bot#readme",
+  "dependencies": {
+    "grammy": "^1.43.0"
+  }
+}
