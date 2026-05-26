@@ -36,6 +36,7 @@ async function loadDB() {
     u.referral_list = u.referral_list || [];
     u.totalEarned = u.totalEarned || 0;
     u.totalSpent = u.totalSpent || 0;
+    u.sub_verified = u.sub_verified || false; // 🆕 Флаг проверки подписок
   }
   return db;
 }
@@ -79,7 +80,12 @@ const adjustBalance = (id, amount, type, desc) => {
 const getPendingWithdrawals = () => Object.values(db.withdrawals).filter(w => w.status === 'pending').sort((a,b) => b.created_at - a.created_at);
 const getStats = () => {
   const users = Object.values(db.users);
-  return { total: users.length, balance: users.reduce((s,u) => s + (u.balance||0), 0), pending: getPendingWithdrawals().length };
+  return { 
+    total: users.length, 
+    balance: users.reduce((s,u) => s + (u.balance||0), 0), 
+    pending: getPendingWithdrawals().length,
+    totalRefs: users.reduce((s,u) => s + (u.referral_count||0), 0)
+  };
 };
 
 // ==========================================
@@ -102,11 +108,8 @@ const pf = {
   },
   async checkSponsors(userId, links) {
     if (!this.enabled()) return null;
-    try { 
-      const d = await this.request('/sponsors/check', { user_id: userId, links }); 
-      console.log('📡 PiarFlow Response:', JSON.stringify(d)); // Для отладки
-      return d.sponsors || []; 
-    } catch (e) { console.error('❌ PiarFlow Check Error:', e.message); return null; }
+    try { const d = await this.request('/sponsors/check', { user_id: userId, links }); return d.sponsors || []; } 
+    catch { return null; }
   }
 };
 
@@ -128,8 +131,8 @@ const kb = {
   main: (isAdminUser) => {
     const k = new InlineKeyboard();
     k.text('👤 Профиль', 'p_profile').text('💰 Баланс', 'p_balance').row();
-    k.text('👥 Рефералы', 'p_ref').text('💸 Вывод средств', 'p_withdraw').row();
-    k.text('📜 История', 'p_history').row();
+    k.text('👥 Рефералы', 'p_ref').text('📊 Статистика', 'p_stats').row();
+    k.text('💸 Вывод', 'p_withdraw').text('📜 История', 'p_history').row();
     if (isAdminUser) k.text('🔐 Админ-панель', 'a_main').row();
     return k;
   },
@@ -177,7 +180,7 @@ bot.command('start', async (ctx) => {
 
   let user = getUser(uid);
   if (!user) {
-    user = { id: uid, username: uName, first_name: fName, balance: 0, referrer_id: refId||null, pending_referral_id: refId||null, banned: false, totalEarned: 0, totalSpent: 0, created_at: Date.now(), lastActive: Date.now(), referral_count: 0, referral_list: [] };
+    user = { id: uid, username: uName, first_name: fName, balance: 0, referrer_id: refId||null, pending_referral_id: refId||null, sub_verified: false, banned: false, totalEarned: 0, totalSpent: 0, created_at: Date.now(), lastActive: Date.now(), referral_count: 0, referral_list: [] };
     setUser(user);
 
     if (refId) {
@@ -187,7 +190,7 @@ bot.command('start', async (ctx) => {
         if (!ref.referral_list.includes(uid)) ref.referral_list.push(uid);
         if (ref.referral_list.length > 50) ref.referral_list = ref.referral_list.slice(-50);
         setUser(ref);
-        try { await bot.api.sendMessage(ref.id, `🔔 <b>Новый переход по ссылке!</b>\n\n👤 Пользователь: @${uName || `ID ${uid}`}\n📝 Ожидает подтверждения подписки на спонсоров...\n\n<i>Бонус будет начислен автоматически после успешной проверки.</i>`, { parse_mode: 'HTML' }); } 
+        try { await bot.api.sendMessage(ref.id, `🔔 <b>Новый переход по ссылке!</b>\n\n👤 Пользователь: @${uName || `ID ${uid}`}\n📝 Ожидает подтверждения подписки на спонсоров...\n\n<i>Бонус будет начислен автоматически, когда реферал откроет свой профиль.</i>`, { parse_mode: 'HTML' }); } 
         catch (e) { console.log(`🔕 Уведомление рефереру ${ref.id} не доставлено`); }
       }
     }
@@ -209,7 +212,7 @@ bot.command('start', async (ctx) => {
   return ctx.reply(`🌟 <b>Добро пожаловать в экосистему GRAM!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
 });
 
-// ✅ ПРОВЕРКА ПОДПИСОК (СТРОГО ПО СТАТУСАМ PIARFLOW)
+// ✅ ПРОВЕРКА ПОДПИСОК (УСТАНАВЛИВАЕТ ФЛАГ, НО НЕ ДАЁТ НАГРАДУ СРАЗУ)
 ['check_sponsors', 'check_subs'].forEach(cb => {
   bot.callbackQuery(cb, async ctx => {
     await ack(ctx);
@@ -222,31 +225,19 @@ bot.command('start', async (ctx) => {
       if (sponsors?.length) {
         const results = await pf.checkSponsors(uid, sponsors.map(s => s.link));
         if (results && Array.isArray(results) && results.length > 0) {
-          // Строгая проверка по статусам PiarFlow
           const allSubscribed = results.every(r => r.status === 'subscribed');
-          
           if (allSubscribed) {
             isSubscribed = true;
           } else {
             const hasUnsubscribed = results.some(r => r.status === 'unsubscribed');
             const hasNotCounted = results.some(r => r.status === 'not_counted');
-            
-            if (hasUnsubscribed) {
-              failMessage = `⛔ <b>Вы не подписаны на один или несколько каналов.</b>\n\n<i>Пожалуйста, подпишитесь на всех указанных спонсоров и нажмите кнопку проверки снова.</i>`;
-            } else if (hasNotCounted) {
-              failMessage = `⏳ <b>Подписка найдена, но выполнение ещё не засчитано.</b>\n\n<i>Системе PiarFlow требуется время на проверку (обычно 1-3 минуты). Подождите и попробуйте снова.</i>`;
-            } else {
-              failMessage = `❌ <b>Проверка не пройдена.</b>\n\n<i>Убедитесь, что вы подписаны на всех спонсоров и не отписывались от них.</i>`;
-            }
+            if (hasUnsubscribed) failMessage = `⛔ <b>Вы не подписаны на один или несколько каналов.</b>\n\n<i>Пожалуйста, подпишитесь на всех указанных спонсоров и нажмите кнопку проверки снова.</i>`;
+            else if (hasNotCounted) failMessage = `⏳ <b>Подписка найдена, но выполнение ещё не засчитано.</b>\n\n<i>Системе требуется время на проверку (1-3 минуты). Подождите и попробуйте снова.</i>`;
+            else failMessage = `❌ <b>Проверка не пройдена.</b>\n\n<i>Убедитесь, что вы подписаны на всех спонсоров.</i>`;
           }
-        } else {
-          failMessage = `❌ <b>Ошибка ответа сервера проверок.</b>\n\n<i>Попробуйте позже или обратитесь в поддержку.</i>`;
-        }
-      } else {
-        isSubscribed = true;
-      }
+        } else failMessage = `❌ <b>Ошибка ответа сервера.</b>\n\n<i>Попробуйте позже.</i>`;
+      } else isSubscribed = true;
     } else {
-      // Ручная проверка каналов (фолбэк)
       isSubscribed = true;
       for (const c of db.settings.REQUIRED_CHATS || []) { 
         try { 
@@ -260,18 +251,10 @@ bot.command('start', async (ctx) => {
 
     if (isSubscribed) {
       const user = getUser(uid);
-      // 💰 Начисление реферального бонуса ТОЛЬКО после успешной проверки
-      if (user.pending_referral_id) {
-        const ref = getUser(user.pending_referral_id);
-        if (ref) {
-          adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${user.username || uid} подтвердил подписку`);
-          try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n\n👤 Пользователь: @${user.username || `ID ${uid}`}\n💰 На баланс начислено: <b>${fmt(db.settings.refReward)}</b>\n\n<i>Средства уже доступны для вывода.</i>`, { parse_mode: 'HTML' }); } 
-          catch (e) { console.log(`💸 Уведомление о бонусе ${ref.id} не доставлено`); }
-        }
-        user.pending_referral_id = null; setUser(user);
-      }
-
-      await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 <i>Вам открыт полный доступ к экосистеме GRAM.\nТеперь вы можете управлять балансом, выводить средства и участвовать в реферальной программе.</i>`, {parse_mode:'HTML'});
+      // 🆕 Только ставим флаг. Награда будет при открытии профиля.
+      user.sub_verified = true; setUser(user);
+      
+      await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 <i>Перейдите в раздел "Профиль", чтобы активировать реферальный бонус пригласителя и получить полный доступ.</i>`, {parse_mode:'HTML'});
       await ctx.reply(`👋 <b>Главное меню:</b>`, {reply_markup: kb.main(isAdmin(uid)), parse_mode:'HTML'});
     } else {
       await ctx.editMessageText(failMessage, {parse_mode:'HTML'});
@@ -282,12 +265,15 @@ bot.command('start', async (ctx) => {
 // ЭКРАНЫ ПОЛЬЗОВАТЕЛЯ
 const screens = {
   'p_main': (ctx, u) => safeEdit(ctx, `🌟 <b>Главное меню экосистемы GRAM</b>\n\n💰 Текущий баланс: <code>${fmt(u.balance)}</code>\n📈 Всего начислено: <code>${fmt(u.totalEarned)}</code>\n📤 Всего выведено: <code>${fmt(u.totalSpent)}</code>\n\n🔗 <b>Ваша персональная ссылка:</b>\n<code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>\n\n<i>💡 Выберите нужный раздел ниже для управления аккаунтом или отслеживания статистики.</i>`, kb.main(isAdmin(u.id))),
-  'p_profile': (ctx, u) => safeEdit(ctx, `👤 <b>Ваш профиль пользователя</b>\n\n🆔 Идентификатор: <code>${u.id}</code>\n👤 Имя: ${u.first_name} ${u.username ? `(@${u.username})` : '<i>не указано</i>'}\n📅 Регистрация: <i>${new Date(u.created_at).toLocaleString('ru-RU')}</i>\n🟢 Последняя активность: <i>${new Date(u.lastActive).toLocaleString('ru-RU')}</i>\n\n💰 <b>Финансовая сводка:</b>\n• Текущий баланс: <code>${fmt(u.balance)}</code>\n• Всего заработано: <code>${fmt(u.totalEarned)}</code>\n• Всего потрачено: <code>${fmt(u.totalSpent)}</code>\n\n👥 <b>Реферальная сеть:</b>\n• Приглашено участников: <b>${u.referral_count || 0}</b>`, kb.back()),
   'p_balance': (ctx, u) => safeEdit(ctx, `💰 <b>Детальная финансовая информация</b>\n\n📊 Текущий доступный баланс:\n<code>${fmt(u.balance)}</code>\n\n📈 Всего начислено за всё время:\n<code>${fmt(u.totalEarned)}</code>\n\n📤 Всего выведено или потрачено:\n<code>${fmt(u.totalSpent)}</code>\n\n<i>🔹 Для увеличения баланса приглашайте новых участников по вашей ссылке. Минимальная сумма для вывода: ${fmt(db.settings.minWithdraw)}</i>`, kb.back()),
   'p_ref': (ctx, u) => {
     const refs = (u.referral_list || []).slice(0, 10);
     const list = refs.length ? refs.map((id, i) => { const r = getUser(id); return `${i+1}. ${r?.username ? `@${r.username}` : `ID <code>${id}</code>`} <i>(${fmt(r?.balance||0)})</i>`; }).join('\n') : '📭 <i>У вас пока нет приглашённых участников. Начните делиться ссылкой прямо сейчас!</i>';
     return safeEdit(ctx, `👥 <b>Ваша реферальная сеть</b>\n\n🔹 Приглашено всего: <b>${u.referral_count || 0}</b>\n💰 Награда за каждого активного: <b>${fmt(db.settings.refReward)}</b>\n\n📋 <b>Последние 10 участников:</b>\n${list}\n\n🔗 <b>Ваша ссылка для приглашений:</b>\n<code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>\n\n<i>💡 Размещайте ссылку в социальных сетях и тематических чатах для пассивного дохода.</i>`, kb.back());
+  },
+  'p_stats': (ctx) => {
+    const st = getStats();
+    return safeEdit(ctx, `📊 <b>Общая статистика бота</b>\n\n👥 Всего пользователей: <b>${st.total}</b>\n💰 Общий баланс в системе: <b>${fmt(st.balance)}</b>\n🤝 Всего реферальных связей: <b>${st.totalRefs}</b>\n📋 Ожидают выплат: <b>${st.pending}</b>\n\n<i>📈 Система работает стабильно. Спасибо за участие в экосистеме GRAM!</i>`, kb.back());
   },
   'p_withdraw': (ctx, u) => {
     if (u.balance < db.settings.minWithdraw) return safeEdit(ctx, `💸 <b>Лимит вывода средств не достигнут</b>\n\n❌ Минимальная сумма для заявки: <code>${fmt(db.settings.minWithdraw)}</code>\n📊 Ваш текущий баланс: <code>${fmt(u.balance)}</code>\n\n<i>🔹 Приглашайте рефералов или ожидайте начислений, чтобы достичь порога.</i>`, kb.back());
@@ -299,8 +285,41 @@ const screens = {
     return safeEdit(ctx, `📜 <b>История ваших транзакций</b>\n\n${m}`, kb.back());
   }
 };
+
+// 🔑 ОБРАБОТЧИК ПРОФИЛЯ С ЛОГИКОЙ НАЧИСЛЕНИЯ НАГРАДЫ
+bot.callbackQuery('p_profile', async ctx => {
+  await ack(ctx);
+  const u = getUser(ctx.from.id);
+  if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
+
+  // 🎁 НАЧИСЛЕНИЕ НАГРАДЫ ТОЛЬКО ПРИ ОТКРЫТИИ ПРОФИЛЯ
+  if (u.pending_referral_id && u.sub_verified) {
+    const ref = getUser(u.pending_referral_id);
+    if (ref) {
+      adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${u.username||u.id} открыл профиль`);
+      try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n\n👤 Пользователь: @${u.username || `ID ${u.id}`}\n💰 На баланс начислено: <b>${fmt(db.settings.refReward)}</b>\n\n<i>Средства уже доступны для вывода.</i>`, { parse_mode: 'HTML' }); } 
+      catch (e) { console.log(`💸 Уведомление о бонусе не доставлено`); }
+    }
+    u.pending_referral_id = null;
+    u.sub_verified = false;
+    setUser(u);
+  }
+
+  // Отрисовка профиля
+  const txt = `👤 <b>Ваш профиль пользователя</b>\n\n🆔 Идентификатор: <code>${u.id}</code>\n👤 Имя: ${u.first_name} ${u.username ? `(@${u.username})` : '<i>не указано</i>'}\n📅 Регистрация: <i>${new Date(u.created_at).toLocaleString('ru-RU')}</i>\n🟢 Последняя активность: <i>${new Date(u.lastActive).toLocaleString('ru-RU')}</i>\n\n💰 <b>Финансовая сводка:</b>\n• Текущий баланс: <code>${fmt(u.balance)}</code>\n• Всего заработано: <code>${fmt(u.totalEarned)}</code>\n• Всего потрачено: <code>${fmt(u.totalSpent)}</code>\n\n👥 <b>Реферальная сеть:</b>\n• Приглашено участников: <b>${u.referral_count || 0}</b>`;
+  await safeEdit(ctx, txt, kb.back());
+});
+
+// Остальные экраны
 Object.entries(screens).forEach(([id, fn]) => {
-  bot.callbackQuery(id, async ctx => { ack(ctx); const u=getUser(ctx.from.id); if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true}); try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка загрузки раздела.', {reply_markup:kb.main(isAdmin(u.id)), parse_mode:'HTML'}); } });
+  if(id !== 'p_profile') { // p_profile уже зарегистрирован выше
+    bot.callbackQuery(id, async ctx => { 
+      await ack(ctx); 
+      const u=getUser(ctx.from.id); 
+      if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true}); 
+      try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка загрузки раздела.', {reply_markup:kb.main(isAdmin(u.id)), parse_mode:'HTML'}); } 
+    });
+  }
 });
 
 bot.callbackQuery('p_wd_input', async ctx => {
