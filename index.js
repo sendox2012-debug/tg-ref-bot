@@ -36,7 +36,7 @@ async function loadDB() {
     u.referral_list = u.referral_list || [];
     u.totalEarned = u.totalEarned || 0;
     u.totalSpent = u.totalSpent || 0;
-    u.sub_verified = u.sub_verified || false; // 🆕 Флаг проверки подписок
+    u.sub_verified = u.sub_verified || false;
   }
   return db;
 }
@@ -89,27 +89,48 @@ const getStats = () => {
 };
 
 // ==========================================
-// 3. PIARFLOW API
+// 3. PIARFLOW API (СТРОГО ПО ДОКУМЕНТАЦИИ)
 // ==========================================
 const pf = {
   enabled: () => !!CONFIG.PIARFLOW_API_KEY && CONFIG.PIARFLOW_API_KEY.length > 10,
   async request(endpoint, body) {
     if (!this.enabled()) throw new Error('API_KEY_EMPTY');
     const res = await fetch(`${CONFIG.PIARFLOW_BASE_URL}${endpoint}`, {
-      method: 'POST', headers: { 'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      method: 'POST', 
+      headers: { 
+        'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 
+        'Content-Type': 'application/json' 
+      }, 
+      body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`API ${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      console.error(`❌ PiarFlow API ${res.status}: ${errText}`);
+      throw new Error(`API ${res.status}: ${errText}`);
+    }
     return res.json();
   },
   async getSponsors(userId, chatId) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors', { user_id: userId, chat_id: chatId, max_sponsors: 10 }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors', { user_id: userId, chat_id: chatId, max_sponsors: 10 }); 
+      console.log(`📡 PiarFlow Sponsors [${userId}]:`, JSON.stringify(d.sponsors || []));
+      return d.sponsors || []; 
+    } catch (e) { 
+      console.error(`❌ PiarFlow getSponsors: ${e.message}`); 
+      return null; 
+    }
   },
   async checkSponsors(userId, links) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors/check', { user_id: userId, links }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors/check', { user_id: userId, links }); 
+      console.log(`📡 PiarFlow Check [${userId}]:`, JSON.stringify(d.sponsors || []));
+      return d.sponsors || []; 
+    } catch (e) { 
+      console.error(`❌ PiarFlow checkSponsors: ${e.message}`); 
+      return null; 
+    }
   }
 };
 
@@ -212,31 +233,48 @@ bot.command('start', async (ctx) => {
   return ctx.reply(`🌟 <b>Добро пожаловать в экосистему GRAM!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
 });
 
-// ✅ ПРОВЕРКА ПОДПИСОК (УСТАНАВЛИВАЕТ ФЛАГ, НО НЕ ДАЁТ НАГРАДУ СРАЗУ)
+// ✅ ПРОВЕРКА ПОДПИСОК (ИСПРАВЛЕНА: СПОНСОРЫ НЕ ПРОПАДАЮТ ПРИ ОШИБКЕ)
 ['check_sponsors', 'check_subs'].forEach(cb => {
   bot.callbackQuery(cb, async ctx => {
     await ack(ctx);
     const uid = ctx.from.id;
     let isSubscribed = false;
     let failMessage = '';
+    let sponsorsToShow = null;
 
     if (cb === 'check_sponsors') {
       const sponsors = await pf.getSponsors(uid, ctx.chat.id);
+      sponsorsToShow = sponsors;
+      
       if (sponsors?.length) {
-        const results = await pf.checkSponsors(uid, sponsors.map(s => s.link));
+        const links = sponsors.map(s => s.link);
+        const results = await pf.checkSponsors(uid, links);
+        
+        console.log(`🔍 PiarFlow Check [${uid}]:`, JSON.stringify(results));
+        
         if (results && Array.isArray(results) && results.length > 0) {
           const allSubscribed = results.every(r => r.status === 'subscribed');
+          
           if (allSubscribed) {
             isSubscribed = true;
           } else {
-            const hasUnsubscribed = results.some(r => r.status === 'unsubscribed');
-            const hasNotCounted = results.some(r => r.status === 'not_counted');
-            if (hasUnsubscribed) failMessage = `⛔ <b>Вы не подписаны на один или несколько каналов.</b>\n\n<i>Пожалуйста, подпишитесь на всех указанных спонсоров и нажмите кнопку проверки снова.</i>`;
-            else if (hasNotCounted) failMessage = `⏳ <b>Подписка найдена, но выполнение ещё не засчитано.</b>\n\n<i>Системе требуется время на проверку (1-3 минуты). Подождите и попробуйте снова.</i>`;
-            else failMessage = `❌ <b>Проверка не пройдена.</b>\n\n<i>Убедитесь, что вы подписаны на всех спонсоров.</i>`;
+            const unsubscribed = results.filter(r => r.status === 'unsubscribed');
+            const notCounted = results.filter(r => r.status === 'not_counted');
+            
+            if (unsubscribed.length > 0) {
+              failMessage = `⛔ <b>Вы не подписаны на ${unsubscribed.length} канал(а/ов).</b>\n\n<i>Пожалуйста, подпишитесь на всех указанных спонсоров и нажмите кнопку проверки снова.</i>`;
+            } else if (notCounted.length > 0) {
+              failMessage = `⏳ <b>Подписка найдена, но выполнение ещё не засчитано.</b>\n\n<i>PiarFlow требуется 1-3 минуты на обновление статуса. Подождите и попробуйте снова.</i>`;
+            } else {
+              failMessage = `❌ <b>Проверка не пройдена.</b>\n\n<i>Убедитесь, что вы не отписывались от спонсоров после подписки.</i>`;
+            }
           }
-        } else failMessage = `❌ <b>Ошибка ответа сервера.</b>\n\n<i>Попробуйте позже.</i>`;
-      } else isSubscribed = true;
+        } else {
+          failMessage = `❌ <b>Ошибка ответа сервера проверок.</b>\n\n<i>Попробуйте позже или обратитесь в поддержку.</i>`;
+        }
+      } else {
+        isSubscribed = true;
+      }
     } else {
       isSubscribed = true;
       for (const c of db.settings.REQUIRED_CHATS || []) { 
@@ -251,12 +289,29 @@ bot.command('start', async (ctx) => {
 
     if (isSubscribed) {
       const user = getUser(uid);
-      // 🆕 Только ставим флаг. Награда будет при открытии профиля.
-      user.sub_verified = true; setUser(user);
-      
-      await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 <i>Перейдите в раздел "Профиль", чтобы активировать реферальный бонус пригласителя и получить полный доступ.</i>`, {parse_mode:'HTML'});
+      if (user.pending_referral_id && user.sub_verified) {
+        const ref = getUser(user.pending_referral_id);
+        if (ref) {
+          adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${user.username || uid} открыл профиль`);
+          try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n\n👤 Пользователь: @${user.username || `ID ${uid}`}\n💰 На баланс начислено: <b>${fmt(db.settings.refReward)}</b>\n\n<i>Средства уже доступны для вывода.</i>`, { parse_mode: 'HTML' }); } 
+          catch (e) { console.log(`💸 Уведомление о бонусе не доставлено`); }
+        }
+        user.pending_referral_id = null;
+        user.sub_verified = false;
+        setUser(user);
+      }
+
+      await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 <i>Вам открыт полный доступ к экосистеме GRAM.</i>`, {parse_mode:'HTML'});
       await ctx.reply(`👋 <b>Главное меню:</b>`, {reply_markup: kb.main(isAdmin(uid)), parse_mode:'HTML'});
+      
     } else {
+      if (sponsorsToShow?.length) {
+        const txt = `🔒 <b>Для доступа подпишитесь на спонсоров</b>\n\n📋 <b>Список (${sponsorsToShow.length}):</b>\n${sponsorsToShow.map((s,i)=>`🔹 ${i+1}. ${s.link}`).join('\n')}\n\n⚠️ ${failMessage}`;
+        const k = new InlineKeyboard(); 
+        sponsorsToShow.forEach(s=>k.url(`📢 Подписаться`, s.link).row()); 
+        k.text('✅ Проверить подписку', 'check_sponsors').row();
+        return ctx.editMessageText(txt, { reply_markup: k, parse_mode: 'HTML' });
+      }
       await ctx.editMessageText(failMessage, {parse_mode:'HTML'});
     }
   });
@@ -292,7 +347,7 @@ bot.callbackQuery('p_profile', async ctx => {
   const u = getUser(ctx.from.id);
   if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
 
-  // 🎁 НАЧИСЛЕНИЕ НАГРАДЫ ТОЛЬКО ПРИ ОТКРЫТИИ ПРОФИЛЯ
+  // 🎁 НАЧИСЛЕНИЕ НАГРАДЫ ТОЛЬКО ПРИ ОТКРЫТИИ ПРОФИЛЯ + ПРОВЕРЕННЫЕ ПОДПИСКИ
   if (u.pending_referral_id && u.sub_verified) {
     const ref = getUser(u.pending_referral_id);
     if (ref) {
@@ -305,14 +360,13 @@ bot.callbackQuery('p_profile', async ctx => {
     setUser(u);
   }
 
-  // Отрисовка профиля
   const txt = `👤 <b>Ваш профиль пользователя</b>\n\n🆔 Идентификатор: <code>${u.id}</code>\n👤 Имя: ${u.first_name} ${u.username ? `(@${u.username})` : '<i>не указано</i>'}\n📅 Регистрация: <i>${new Date(u.created_at).toLocaleString('ru-RU')}</i>\n🟢 Последняя активность: <i>${new Date(u.lastActive).toLocaleString('ru-RU')}</i>\n\n💰 <b>Финансовая сводка:</b>\n• Текущий баланс: <code>${fmt(u.balance)}</code>\n• Всего заработано: <code>${fmt(u.totalEarned)}</code>\n• Всего потрачено: <code>${fmt(u.totalSpent)}</code>\n\n👥 <b>Реферальная сеть:</b>\n• Приглашено участников: <b>${u.referral_count || 0}</b>`;
   await safeEdit(ctx, txt, kb.back());
 });
 
 // Остальные экраны
 Object.entries(screens).forEach(([id, fn]) => {
-  if(id !== 'p_profile') { // p_profile уже зарегистрирован выше
+  if(id !== 'p_profile') {
     bot.callbackQuery(id, async ctx => { 
       await ack(ctx); 
       const u=getUser(ctx.from.id); 
