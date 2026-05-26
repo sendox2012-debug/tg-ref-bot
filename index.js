@@ -6,10 +6,10 @@ const path = require('path');
 // 1. КОНФИГУРАЦИЯ
 // ==========================================
 const CONFIG = {
-  BOT_TOKEN: '8530248644:AAFKDUyFF9sydDTYnw_fuZt0iOoh96MJljA',
+  BOT_TOKEN: '-Fw-JokBjo-mmNfQsDyt82ZsKUXzSkE7',
   ADMIN_IDS: [7295281658, 5137860558],
   DB_PATH: './data.json',
-  PIARFLOW_API_KEY: '-Fw-JokBjo-mmNfQsDyt82ZsKUXzSkE7',
+  PIARFLOW_API_KEY: '8859814892:AAGvH7e0-tcmgIhD6qP14oeL0iWO4Y4ASZg',
   PIARFLOW_BASE_URL: 'https://piarflow.ru/v1'
 };
 
@@ -108,7 +108,7 @@ const pf = {
 };
 
 // ==========================================
-// 4. УТИЛИТЫ И СОСТОЯНИЯ
+// 4. УТИЛИТЫ И КЛАВИАТУРЫ
 // ==========================================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmt = v => `${parseFloat(v||0).toLocaleString('ru-RU')} GRAM`;
@@ -121,9 +121,6 @@ const safeEdit = async (ctx, text, kb) => {
 };
 const ack = async ctx => { try { await ctx.answerCallbackQuery(); } catch {} };
 
-// ==========================================
-// 5. КЛАВИАТУРЫ
-// ==========================================
 const kb = {
   main: (isAdminUser) => {
     const k = new InlineKeyboard();
@@ -135,9 +132,6 @@ const kb = {
   },
   back: () => new InlineKeyboard().text('🔙 Главное меню', 'p_main'),
   backAdmin: () => new InlineKeyboard().text('🔙 В админку', 'a_main'),
-  refList: (page) => new InlineKeyboard()
-    .text('⬅️ Назад', `p_ref_prev:${page}`).text(`📄 ${page+1}`, 'p_ref_page').text('Вперёд ➡️', `p_ref_next:${page}`)
-    .row().text('🔙 Главное меню', 'p_main'),
   adminMain: () => new InlineKeyboard()
     .text('🔍 Поиск юзера', 'a_search').text('👥 Все пользователи', 'a_users').row()
     .text('📋 Заявки на вывод', 'a_wd').text('⚙️ Настройки', 'a_settings').row()
@@ -151,7 +145,7 @@ const kb = {
 };
 
 // ==========================================
-// 6. БОТ И ОБРАБОТЧИКИ
+// 5. БОТ И ЗАПУСК
 // ==========================================
 const bot = new Bot(CONFIG.BOT_TOKEN);
 
@@ -171,7 +165,7 @@ async function startBotSafely() {
   }
 }
 
-// /START & ПРОВЕРКА ПОДПИСОК
+// /START
 bot.command('start', async (ctx) => {
   const uid = ctx.from.id; const uName = ctx.from.username; const fName = ctx.from.first_name || 'Участник';
   const refMatch = (ctx.message?.text||'').match(/ref_(\d+)/);
@@ -182,9 +176,18 @@ bot.command('start', async (ctx) => {
   if (!user) {
     user = { id: uid, username: uName, first_name: fName, balance: 0, referrer_id: refId||null, pending_referral_id: refId||null, banned: false, totalEarned: 0, totalSpent: 0, created_at: Date.now(), lastActive: Date.now(), referral_count: 0, referral_list: [] };
     setUser(user);
+
     if (refId) {
       const ref = getUser(refId);
-      if (ref) { ref.referral_count++; if(!ref.referral_list.includes(uid)) ref.referral_list.push(uid); if(ref.referral_list.length>50) ref.referral_list.shift(); setUser(ref); }
+      if (ref) {
+        ref.referral_count++;
+        if (!ref.referral_list.includes(uid)) ref.referral_list.push(uid);
+        if (ref.referral_list.length > 50) ref.referral_list = ref.referral_list.slice(-50);
+        setUser(ref);
+        // 🔔 Уведомление рефереру о переходе
+        try { await bot.api.sendMessage(ref.id, `🔔 <b>Новый переход по ссылке!</b>\n\n👤 Пользователь: @${uName || `ID ${uid}`}\n📝 Ожидает подтверждения подписки на спонсоров...\n\n<i>Бонус будет начислен автоматически после успешной проверки.</i>`, { parse_mode: 'HTML' }); } 
+        catch (e) { console.log(`🔕 Уведомление рефереру ${ref.id} не доставлено: ${e.message}`); }
+      }
     }
   } else { 
     user.username = uName; user.first_name = fName; setUser(user); 
@@ -204,7 +207,7 @@ bot.command('start', async (ctx) => {
   return ctx.reply(`🌟 <b>Добро пожаловать в экосистему GRAM!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
 });
 
-// ПРОВЕРКА ПОДПИСОК (PIARFLOW ИЛИ РУЧНАЯ)
+// ПРОВЕРКА ПОДПИСОК
 ['check_sponsors', 'check_subs'].forEach(cb => {
   bot.callbackQuery(cb, async ctx => {
     await ack(ctx);
@@ -229,12 +232,13 @@ bot.command('start', async (ctx) => {
 
     if (isSubscribed) {
       const user = getUser(uid);
-      // 🎯 РЕФЕРАЛЬНЫЙ БОНУС НАЧИСЛЯЕТСЯ ТОЛЬКО ЗДЕСЬ (ПОСЛЕ УСПЕШНОЙ ПРОВЕРКИ)
+      // 💰 Начисление реферального бонуса ТОЛЬКО после успешной проверки
       if (user.pending_referral_id) {
         const ref = getUser(user.pending_referral_id);
         if (ref) {
-          adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${user.username||uid} выполнил подписку на спонсоров`);
-          try { await bot.api.sendMessage(ref.id, `🎉 <b>Реферал активирован!</b>\n\n👤 Пользователь: @${user.username||uid}\n💰 На ваш баланс начислено: <b>${fmt(db.settings.refReward)}</b>\n\n<i>Бонус успешно зачислен.</i>`, {parse_mode:'HTML'}); } catch {}
+          adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${user.username || uid} подтвердил подписку`);
+          try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n\n👤 Пользователь: @${user.username || `ID ${uid}`}\n💰 На баланс начислено: <b>${fmt(db.settings.refReward)}</b>\n\n<i>Средства уже доступны для вывода.</i>`, { parse_mode: 'HTML' }); } 
+          catch (e) { console.log(`💸 Уведомление о бонусе ${ref.id} не доставлено: ${e.message}`); }
         }
         user.pending_referral_id = null; setUser(user);
       }
@@ -268,7 +272,7 @@ const screens = {
   }
 };
 Object.entries(screens).forEach(([id, fn]) => {
-  bot.callbackQuery(id, async ctx => { ack(ctx); const u=getUser(ctx.from.id); if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true}); try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка.', {reply_markup:kb.main(isAdmin(u.id)), parse_mode:'HTML'}); } });
+  bot.callbackQuery(id, async ctx => { ack(ctx); const u=getUser(ctx.from.id); if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true}); try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка загрузки раздела.', {reply_markup:kb.main(isAdmin(u.id)), parse_mode:'HTML'}); } });
 });
 
 bot.callbackQuery('p_wd_input', async ctx => {
@@ -277,7 +281,7 @@ bot.callbackQuery('p_wd_input', async ctx => {
 });
 
 // ==========================================
-// 7. АДМИН ПАНЕЛЬ
+// 6. АДМИН ПАНЕЛЬ
 // ==========================================
 bot.callbackQuery('a_main', async ctx => {
   await ack(ctx); if(!isAdmin(ctx.from.id)) return ctx.answerCallbackQuery({text:'🔒',show_alert:true});
@@ -344,7 +348,7 @@ bot.callbackQuery(/^a_ban:(\d+)$/, async ctx => {
 });
 
 // ==========================================
-// 8. ОБРАБОТКА ТЕКСТА
+// 7. ОБРАБОТКА ТЕКСТА
 // ==========================================
 bot.on('message:text', async ctx => {
   const uid = ctx.from.id; const txt = ctx.message.text.trim(); const st = userStates.get(uid);
@@ -366,7 +370,7 @@ bot.on('message:text', async ctx => {
   if(/^a_bal:(\d+)$/.test(st.act)) { const uidT = parseInt(st.act.split(':')[1],10); const amt=parseFloat(txt.replace(/\s/g,'')); if(isNaN(amt))return ctx.reply('❌ <b>Введите число</b>',{parse_mode:'HTML'}); adjustBalance(uidT,amt,'adm_balance',`Админ ${uid}`); userStates.delete(uid); const u=getUser(uidT); return ctx.reply(`✅ <b>Баланс изменён</b>\n👤 <code>${uidT}</code> | 📊 ${amt>0?'+':''}${fmt(amt)} | 💰 Новый: <code>${fmt(u.balance)}</code>`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); }
 });
 
-bot.catch((err, ctx) => { console.error(`❌ [Global] ${err.message}`); if(ctx) ctx.reply('⚠️ Ошибка.', { parse_mode: 'HTML' }).catch(()=>{}); });
+bot.catch((err, ctx) => { console.error(`❌ [Global] ${err.message}`); if(ctx) ctx.reply('⚠️ Произошла техническая ошибка.', { parse_mode: 'HTML' }).catch(()=>{}); });
 
 console.log('🚀 Запуск...');
 loadDB().then(() => startBotSafely()).catch(err => { console.error('❌ Fatal:', err.message); process.exit(1); });
