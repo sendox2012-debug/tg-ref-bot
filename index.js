@@ -83,7 +83,7 @@ const getStats = () => {
 };
 
 // ==========================================
-// 3. PIARFLOW API (ОТЛАДОЧНАЯ ВЕРСИЯ)
+// 3. PIARFLOW API
 // ==========================================
 const pf = {
   enabled: () => !!CONFIG.PIARFLOW_API_KEY && CONFIG.PIARFLOW_API_KEY.length > 10,
@@ -117,7 +117,7 @@ const pf = {
 };
 
 // ==========================================
-// 4. УТИЛИТЫ И ПРОВЕРКА ДОСТУПА
+// 4. УТИЛИТЫ И ПРОВЕРКА ДОСТУПА (БЕЗ СПИСКОВ В ТЕКСТЕ)
 // ==========================================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmt = v => `${parseFloat(v||0).toLocaleString('ru-RU')} GRAM`;
@@ -134,26 +134,15 @@ const requireSub = async (ctx, action) => {
   const uid = ctx.from.id;
   let isSubscribed = true;
   let sponsors = null;
-  let failReason = '';
 
   if (pf.enabled()) {
     sponsors = await pf.getSponsors(uid, ctx.chat.id);
-    if (sponsors === null) {
-      console.log(`⚠️ PF API недоступен, пропускаем проверку для ${uid}`);
-      return action(); // Fallback: не блокируем при падении API
-    }
+    if (sponsors === null) return action(); // Fallback при падении API
     if (sponsors.length > 0) {
       const res = await pf.checkSponsors(uid, sponsors.map(s => s.link));
-      if (res === null) {
-        console.log(`⚠️ PF check недоступен, пропускаем для ${uid}`);
-        return action();
-      }
+      if (res === null) return action();
       const allSub = res.every(r => r.status === 'subscribed');
-      if (!allSub) {
-        isSubscribed = false;
-        const issues = res.filter(r => r.status !== 'subscribed').map(r => `${r.link} → ${r.status}`).join('\n');
-        failReason = `Не пройдено:\n${issues}`;
-      }
+      if (!allSub) isSubscribed = false;
     }
   } else if (db.settings.REQUIRED_CHATS?.length > 0) {
     for (const c of db.settings.REQUIRED_CHATS) {
@@ -167,10 +156,16 @@ const requireSub = async (ctx, action) => {
 
   if (!isSubscribed) {
     const links = sponsors?.length ? sponsors : db.settings.REQUIRED_CHATS;
-    const listStr = links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n');
-    const txt = `🔒 <b>Доступ ограничен</b>\n\nНеобходимо подписаться на спонсоров:\n${listStr}\n\n<i>${failReason}</i>`;
+    
+    // 🔹 ЧИСТОЕ СООБЩЕНИЕ БЕЗ СПИСКОВ
+    const txt = `🔒 <b>Доступ временно ограничен</b>\n\nДля использования бота необходимо подписаться на партнёрские ресурсы.\n<i>После выполнения условия нажмите кнопку проверки ниже.</i>`;
+
+    // 🔹 ВСЕ ССЫЛКИ ТОЛЬКО В ИНЛАЙН-КНОПКАХ
     const k = new InlineKeyboard();
-    links.forEach(l => k.url(`📢 Подписаться`, typeof l === 'string' ? (l.startsWith('-100')?`https://t.me/c/${l.slice(4)}`:`https://t.me/${l.replace(/^@/,'')}`) : l.link).row());
+    links.forEach(l => {
+      const url = typeof l === 'string' ? (l.startsWith('-100') ? `https://t.me/c/${l.slice(4)}` : `https://t.me/${l.replace(/^@/, '')}`) : l.link;
+      k.url('📢 Подписаться', url).row();
+    });
     k.text('✅ Проверить подписку', 'check_sponsors').row();
     return ctx.reply(txt, { reply_markup: k, parse_mode: 'HTML' });
   }
@@ -262,7 +257,7 @@ bot.callbackQuery('check_sponsors', async (ctx) => {
   });
 });
 
-// КОМАНДА ДЛЯ АДМИН-ДИАГНОСТИКИ PIARFLOW
+// АДМИН ДИАГНОСТИКА
 bot.command('test_pf', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const uid = ctx.from.id;
