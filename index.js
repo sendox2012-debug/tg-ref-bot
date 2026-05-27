@@ -83,27 +83,35 @@ const getStats = () => {
 };
 
 // ==========================================
-// 3. PIARFLOW API
+// 3. PIARFLOW API (СТРОГО ПО ДОКУМЕНТАЦИИ)
 // ==========================================
 const pf = {
   enabled: () => !!CONFIG.PIARFLOW_API_KEY && CONFIG.PIARFLOW_API_KEY.length > 10,
   async request(endpoint, body) {
     if (!this.enabled()) throw new Error('API_KEY_EMPTY');
     const res = await fetch(`${CONFIG.PIARFLOW_BASE_URL}${endpoint}`, {
-      method: 'POST', headers: { 'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      method: 'POST', 
+      headers: { 'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`API ${res.status}: ${await res.text().catch(()=>'')}`);
+    if (!res.ok) throw new Error(`PiarFlow API ${res.status}`);
     return res.json();
   },
-  async getSponsors(userId, chatId) {
+  async getSponsors(uid, chatId) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors', { user_id: userId, chat_id: chatId, max_sponsors: 10 }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors', { user_id: uid, chat_id: chatId, max_sponsors: 10 }); 
+      console.log(`📡 PF /sponsors [${uid}]: ${JSON.stringify(d.sponsors || [])}`);
+      return d.sponsors || []; 
+    } catch (e) { console.error(`❌ PF /sponsors error: ${e.message}`); return null; }
   },
-  async checkSponsors(userId, links) {
+  async checkSponsors(uid, links) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors/check', { user_id: userId, links }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors/check', { user_id: uid, links }); 
+      console.log(`📡 PF /check [${uid}]: ${JSON.stringify(d.sponsors || [])}`);
+      return d.sponsors || []; 
+    } catch (e) { console.error(`❌ PF /check error: ${e.message}`); return null; }
   }
 };
 
@@ -117,14 +125,11 @@ const userStates = new Map();
 
 const safeEdit = async (ctx, text, kb) => {
   try { await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'HTML' }); }
-  catch (err) {
-    if (err.description?.includes('not modified') || err.description?.includes('can\'t be edited')) {
-      await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-    } else await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-  }
+  catch { await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }); }
 };
 const ack = async ctx => { try { await ctx.answerCallbackQuery(); } catch {} };
 
+// 🔒 СТРОГАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ЛЮБЫМ ДЕЙСТВИЕМ
 const requireSub = async (ctx, action) => {
   const uid = ctx.from.id;
   let isSubscribed = true;
@@ -134,13 +139,14 @@ const requireSub = async (ctx, action) => {
     sponsors = await pf.getSponsors(uid, ctx.chat.id);
     if (sponsors?.length) {
       const res = await pf.checkSponsors(uid, sponsors.map(s => s.link));
+      // Статусы: subscribed, unsubscribed, not_counted
       isSubscribed = res?.every(r => r.status === 'subscribed') || false;
     }
   } else if (db.settings.REQUIRED_CHATS?.length > 0) {
     for (const c of db.settings.REQUIRED_CHATS) {
       try {
-        const chatId = c.startsWith('-100') ? parseInt(c, 10) : c.replace(/^@/, '');
-        const m = await ctx.api.getChatMember(chatId, uid);
+        const cid = c.startsWith('-100') ? parseInt(c, 10) : c.replace(/^@/, '');
+        const m = await ctx.api.getChatMember(cid, uid);
         if (!['member', 'administrator', 'creator'].includes(m.status)) isSubscribed = false;
       } catch { isSubscribed = false; }
     }
@@ -148,7 +154,8 @@ const requireSub = async (ctx, action) => {
 
   if (!isSubscribed) {
     const links = sponsors?.length ? sponsors : db.settings.REQUIRED_CHATS;
-    const txt = `🔒 <b>Доступ временно ограничен</b>\n\n<i>Для использования бота подтвердите подписку на спонсоров.</i>\n\n📋 <b>Каналы:</b>\n${links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n')}\n\n<i>Нажмите кнопку проверки после подписки.</i>`;
+    const listStr = links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n');
+    const txt = `🔒 <b>Доступ ограничен</b>\n\nДля использования бота необходимо подписаться на спонсоров:\n${listStr}\n\n<i>После подписки нажмите кнопку проверки.</i>`;
     const k = new InlineKeyboard();
     links.forEach(l => k.url(`📢 Подписаться`, typeof l === 'string' ? (l.startsWith('-100')?`https://t.me/c/${l.slice(4)}`:`https://t.me/${l.replace(/^@/,'')}`) : l.link).row());
     k.text('✅ Проверить подписку', 'check_sponsors').row();
@@ -177,7 +184,7 @@ const kb = {
     .text('📢 Рассылка', 'a_broadcast').text('🔙 Закрыть', 'p_main'),
   adminUser: (uid) => new InlineKeyboard()
     .text('💰 Баланс', `a_bal:${uid}`).row()
-    .text('🚫 Бан/Разбан', `a_ban:${uid}`).text('🔙 Назад', 'a_main'),
+    .text('🚫 Бан', `a_ban:${uid}`).text('🔙 Назад', 'a_main'),
   adminWd: (id) => new InlineKeyboard()
     .text('✅ Одобрить', `a_wd_ap:${id}`).text('❌ Отклонить', `a_wd_rj:${id}`).row()
     .text('🔙 Назад', 'a_wd')
@@ -223,17 +230,17 @@ bot.command('start', async (ctx) => await requireSub(ctx, async () => {
         const list = ref.referral_list || []; if (!list.includes(uid)) list.push(uid);
         ref.referral_list = list.length > 50 ? list.slice(-50) : list;
         db.users[String(refId)] = ref; saveDB();
-        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n💰 Бонус начислится, когда реферал откроет профиль.`, { parse_mode: 'HTML' }); } catch {}
+        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n💰 Бонус начислится при открытии профиля.`, { parse_mode: 'HTML' }); } catch {}
       }
     }
-    return ctx.reply(`🌟 <b>Добро пожаловать в GRAM!</b>\n\n💰 Баланс: <code>${fmt(0)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${uid}`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
+    return ctx.reply(`🌟 <b>Добро пожаловать в GRAM!</b>\n\n💰 Баланс: <code>${fmt(0)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${uid}</code>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
   } else {
     user.username = uName; user.first_name = fName; db.users[String(uid)] = user; saveDB();
     return ctx.reply(`👋 <b>С возвращением!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
   }
 }));
 
-// ПРОВЕРКА
+// ПРОВЕРКА ПОДПИСКИ
 bot.callbackQuery('check_sponsors', async (ctx) => {
   await ack(ctx);
   await requireSub(ctx, async () => {
@@ -242,23 +249,24 @@ bot.callbackQuery('check_sponsors', async (ctx) => {
   });
 });
 
-// ОБЁРТКА ЭКРАНОВ
+// ОБЁРТКА ЭКРАНОВ (ВСЕ ЧЕРЕЗ requireSub)
 const wrap = (id, fn) => bot.callbackQuery(id, async ctx => await requireSub(ctx, async () => {
   await ack(ctx); const u = getUser(ctx.from.id);
-  if(!u) return ctx.answerCallbackQuery({text:'⚠️ /start',show_alert:true});
+  if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
   try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка.', {reply_markup:kb.main(isAdmin(u.id)),parse_mode:'HTML'}); }
 }));
 
-// ПРОФИЛЬ + РЕФЕРАЛ
+// ПРОФИЛЬ + РЕФЕРАЛЬНАЯ НАГРАДА
 bot.callbackQuery('p_profile', async ctx => await requireSub(ctx, async () => {
   await ack(ctx);
   const uid = ctx.from.id; const u = getUser(uid);
   if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
 
+  // 💰 НАЧИСЛЕНИЕ ТОЛЬКО ЗДЕСЬ
   if (u.pending_referral_id) {
     const ref = getUser(u.pending_referral_id);
     if (ref) {
-      console.log(`💰 Выплата: ${ref.id} <- ${uid} | ${db.settings.refReward}`);
+      console.log(`💰 Выплата реферала: ${ref.id} <- ${uid} | ${db.settings.refReward}`);
       adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${u.username||uid} открыл профиль`);
       try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n💰 Начислено: <b>${fmt(db.settings.refReward)}</b>`, { parse_mode: 'HTML' }); } catch {}
     }
