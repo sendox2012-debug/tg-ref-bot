@@ -83,32 +83,40 @@ const getStats = () => {
 };
 
 // ==========================================
-// 3. PIARFLOW API
+// 3. PIARFLOW API (СТРОГО ПО ДОКУМЕНТАЦИИ)
 // ==========================================
 const pf = {
   enabled: () => !!CONFIG.PIARFLOW_API_KEY && CONFIG.PIARFLOW_API_KEY.length > 10,
   async request(endpoint, body) {
     if (!this.enabled()) throw new Error('API_KEY_EMPTY');
     const res = await fetch(`${CONFIG.PIARFLOW_BASE_URL}${endpoint}`, {
-      method: 'POST', headers: { 'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      method: 'POST', 
+      headers: { 'Authorization': `Bearer ${CONFIG.PIARFLOW_API_KEY}`, 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`API ${res.status}: ${await res.text().catch(()=>'')}`);
+    if (!res.ok) throw new Error(`PiarFlow API ${res.status}`);
     return res.json();
   },
-  async getSponsors(userId, chatId) {
+  async getSponsors(uid, chatId) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors', { user_id: userId, chat_id: chatId, max_sponsors: 10 }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors', { user_id: uid, chat_id: chatId, max_sponsors: 10 }); 
+      console.log(`📡 PF /sponsors [${uid}]: ${JSON.stringify(d.sponsors || [])}`);
+      return d.sponsors || []; 
+    } catch (e) { console.error(`❌ PF /sponsors error: ${e.message}`); return null; }
   },
-  async checkSponsors(userId, links) {
+  async checkSponsors(uid, links) {
     if (!this.enabled()) return null;
-    try { const d = await this.request('/sponsors/check', { user_id: userId, links }); return d.sponsors || []; } 
-    catch { return null; }
+    try { 
+      const d = await this.request('/sponsors/check', { user_id: uid, links }); 
+      console.log(`📡 PF /check [${uid}]: ${JSON.stringify(d.sponsors || [])}`);
+      return d.sponsors || []; 
+    } catch (e) { console.error(`❌ PF /check error: ${e.message}`); return null; }
   }
 };
 
 // ==========================================
-// 4. УТИЛИТЫ И ПРОВЕРКА ДОСТУПА (СТРОГАЯ)
+// 4. УТИЛИТЫ И ПРОВЕРКА ДОСТУПА
 // ==========================================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmt = v => `${parseFloat(v||0).toLocaleString('ru-RU')} GRAM`;
@@ -117,15 +125,11 @@ const userStates = new Map();
 
 const safeEdit = async (ctx, text, kb) => {
   try { await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'HTML' }); }
-  catch (err) {
-    if (err.description?.includes('not modified') || err.description?.includes('can\'t be edited')) {
-      await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-    } else await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-  }
+  catch { await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }); }
 };
 const ack = async ctx => { try { await ctx.answerCallbackQuery(); } catch {} };
 
-// 🔒 ГЛОБАЛЬНАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ЛЮБЫМ ДЕЙСТВИЕМ
+// 🔒 СТРОГАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ЛЮБЫМ ДЕЙСТВИЕМ
 const requireSub = async (ctx, action) => {
   const uid = ctx.from.id;
   let isSubscribed = true;
@@ -135,13 +139,14 @@ const requireSub = async (ctx, action) => {
     sponsors = await pf.getSponsors(uid, ctx.chat.id);
     if (sponsors?.length) {
       const res = await pf.checkSponsors(uid, sponsors.map(s => s.link));
+      // Статусы: subscribed, unsubscribed, not_counted
       isSubscribed = res?.every(r => r.status === 'subscribed') || false;
     }
   } else if (db.settings.REQUIRED_CHATS?.length > 0) {
     for (const c of db.settings.REQUIRED_CHATS) {
       try {
-        const chatId = c.startsWith('-100') ? parseInt(c, 10) : c.replace(/^@/, '');
-        const m = await ctx.api.getChatMember(chatId, uid);
+        const cid = c.startsWith('-100') ? parseInt(c, 10) : c.replace(/^@/, '');
+        const m = await ctx.api.getChatMember(cid, uid);
         if (!['member', 'administrator', 'creator'].includes(m.status)) isSubscribed = false;
       } catch { isSubscribed = false; }
     }
@@ -149,7 +154,8 @@ const requireSub = async (ctx, action) => {
 
   if (!isSubscribed) {
     const links = sponsors?.length ? sponsors : db.settings.REQUIRED_CHATS;
-    const txt = `🔒 <b>Доступ ограничен</b>\n\nДля использования бота необходимо подписаться на спонсоров:\n${links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n')}`;
+    const listStr = links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n');
+    const txt = `🔒 <b>Доступ ограничен</b>\n\nДля использования бота необходимо подписаться на спонсоров:\n${listStr}\n\n<i>После подписки нажмите кнопку проверки.</i>`;
     const k = new InlineKeyboard();
     links.forEach(l => k.url(`📢 Подписаться`, typeof l === 'string' ? (l.startsWith('-100')?`https://t.me/c/${l.slice(4)}`:`https://t.me/${l.replace(/^@/,'')}`) : l.link).row());
     k.text('✅ Проверить подписку', 'check_sponsors').row();
@@ -167,21 +173,21 @@ const kb = {
     k.text('👤 Профиль', 'p_profile').text('💰 Баланс', 'p_balance').row();
     k.text('👥 Рефералы', 'p_ref').text('📊 Статистика', 'p_stats').row();
     k.text('💸 Вывод', 'p_withdraw').text('📜 История', 'p_history').row();
-    if (isAdminUser) k.text('🔐 Админ-панель', 'a_main').row();
+    if (isAdminUser) k.text('🔐 Админ', 'a_main').row();
     return k;
   },
-  back: () => new InlineKeyboard().text('🔙 Главное меню', 'p_main'),
+  back: () => new InlineKeyboard().text('🔙 Назад', 'p_main'),
   backAdmin: () => new InlineKeyboard().text('🔙 В админку', 'a_main'),
   adminMain: () => new InlineKeyboard()
-    .text('🔍 Поиск юзера', 'a_search').text('👥 Все пользователи', 'a_users').row()
-    .text('📋 Заявки на вывод', 'a_wd').text('⚙️ Настройки', 'a_settings').row()
+    .text('🔍 Поиск', 'a_search').text('👥 Юзеры', 'a_users').row()
+    .text('📋 Заявки', 'a_wd').text('⚙️ Настройки', 'a_settings').row()
     .text('📢 Рассылка', 'a_broadcast').text('🔙 Закрыть', 'p_main'),
   adminUser: (uid) => new InlineKeyboard()
-    .text('💰 Изменить баланс', `a_bal:${uid}`).row()
-    .text('🚫 Забанить', `a_ban:${uid}`).text('🔙 Назад', 'a_main'),
+    .text('💰 Баланс', `a_bal:${uid}`).row()
+    .text('🚫 Бан', `a_ban:${uid}`).text('🔙 Назад', 'a_main'),
   adminWd: (id) => new InlineKeyboard()
     .text('✅ Одобрить', `a_wd_ap:${id}`).text('❌ Отклонить', `a_wd_rj:${id}`).row()
-    .text('🔙 К списку', 'a_wd')
+    .text('🔙 Назад', 'a_wd')
 };
 
 // ==========================================
@@ -205,7 +211,7 @@ async function startBotSafely() {
   }
 }
 
-// /START (с проверкой подписки)
+// /START
 bot.command('start', async (ctx) => await requireSub(ctx, async () => {
   const uid = ctx.from.id; const uName = ctx.from.username; const fName = ctx.from.first_name || 'Участник';
   const refMatch = (ctx.message?.text||'').match(/ref_(\d+)/);
@@ -224,103 +230,96 @@ bot.command('start', async (ctx) => await requireSub(ctx, async () => {
         const list = ref.referral_list || []; if (!list.includes(uid)) list.push(uid);
         ref.referral_list = list.length > 50 ? list.slice(-50) : list;
         db.users[String(refId)] = ref; saveDB();
-        console.log(`🔗 Реферал: ${refId} -> ${uid}`);
-        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n<i>Бонус начислится при открытии профиля.</i>`, { parse_mode: 'HTML' }); } catch {}
+        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n💰 Бонус начислится при открытии профиля.`, { parse_mode: 'HTML' }); } catch {}
       }
     }
+    return ctx.reply(`🌟 <b>Добро пожаловать в GRAM!</b>\n\n💰 Баланс: <code>${fmt(0)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${uid}</code>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
   } else {
     user.username = uName; user.first_name = fName; db.users[String(uid)] = user; saveDB();
+    return ctx.reply(`👋 <b>С возвращением!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
   }
-  return ctx.reply(`🌟 <b>Добро пожаловать в GRAM!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
 }));
 
-// ✅ ПРОВЕРКА ПОДПИСКИ (кнопка)
+// ПРОВЕРКА ПОДПИСКИ
 bot.callbackQuery('check_sponsors', async (ctx) => {
   await ack(ctx);
-  // Просто вызываем любую функцию с requireSub, она сама проверит и пустит дальше
   await requireSub(ctx, async () => {
-    await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 Доступ к боту открыт.`, {parse_mode:'HTML'});
-    await ctx.reply(`👋 <b>Главное меню:</b>`, {reply_markup: kb.main(isAdmin(ctx.from.id)), parse_mode:'HTML'});
+    await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n🎉 Доступ открыт.`, {parse_mode:'HTML'});
+    await ctx.reply(`👋 <b>Меню:</b>`, {reply_markup: kb.main(isAdmin(ctx.from.id)), parse_mode:'HTML'});
   });
 });
 
-// ЭКРАНЫ ПОЛЬЗОВАТЕЛЯ (все через requireSub)
+// ОБЁРТКА ЭКРАНОВ (ВСЕ ЧЕРЕЗ requireSub)
 const wrap = (id, fn) => bot.callbackQuery(id, async ctx => await requireSub(ctx, async () => {
   await ack(ctx); const u = getUser(ctx.from.id);
   if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
   try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка.', {reply_markup:kb.main(isAdmin(u.id)),parse_mode:'HTML'}); }
 }));
 
-wrap('p_main', (ctx, u) => safeEdit(ctx, `🌟 <b>Главное меню</b>\n💰 Баланс: <code>${fmt(u.balance)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>`, kb.main(isAdmin(u.id))));
-wrap('p_balance', (ctx, u) => safeEdit(ctx, `💰 <b>Финансы</b>\n📊 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n📤 Выведено: <code>${fmt(u.totalSpent)}</code>`, kb.back()));
-wrap('p_ref', (ctx, u) => {
-  const list = (u.referral_list||[]).slice(0,10).map((id,i)=>{const r=getUser(id);return `${i+1}. ${r?.username?`@${r.username}`:`ID ${id}`} (${fmt(r?.balance||0)})`}).join('\n') || '📭 <i>Пока нет.</i>';
-  return safeEdit(ctx, `👥 <b>Рефералы</b>\n🔹 Всего: <b>${u.referral_count||0}</b>\n💰 Награда: <b>${fmt(db.settings.refReward)}</b>\n\n📋 Последние:\n${list}`, kb.back());
-});
-wrap('p_stats', (ctx) => { const st=getStats(); return safeEdit(ctx, `📊 <b>Статистика бота</b>\n👥 Пользователей: <b>${st.total}</b>\n💰 В обороте: <b>${fmt(st.balance)}</b>\n🤝 Реф. связей: <b>${st.totalRefs}</b>`, kb.back()); });
-wrap('p_history', (ctx) => {
-  const t=db.transactions.filter(x=>x.user_id===ctx.from.id).slice(-8).reverse();
-  const m=t.length?t.map(x=>`▫️ <code>${x.type}</code> | <b>${x.amount>0?'+':''}${fmt(x.amount)}</b>`).join('\n'):'📭 Пусто.';
-  return safeEdit(ctx, `📜 <b>История</b>\n\n${m}`, kb.back());
-});
-
-// 🔑 ПРОФИЛЬ + НАЧИСЛЕНИЕ РЕФЕРАЛЬНОЙ НАГРАДЫ
+// ПРОФИЛЬ + РЕФЕРАЛЬНАЯ НАГРАДА
 bot.callbackQuery('p_profile', async ctx => await requireSub(ctx, async () => {
   await ack(ctx);
   const uid = ctx.from.id; const u = getUser(uid);
   if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
 
-  // 💰 НАЧИСЛЕНИЕ ТОЛЬКО ЗДЕСЬ (подписка гарантирована requireSub)
+  // 💰 НАЧИСЛЕНИЕ ТОЛЬКО ЗДЕСЬ
   if (u.pending_referral_id) {
     const ref = getUser(u.pending_referral_id);
     if (ref) {
-      console.log(`💰 Выплата: ${ref.id} <- ${uid} | ${db.settings.refReward}`);
-      adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${u.username||uid} подтвердил подписку`);
-      try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n👤 @${u.username || uid}\n💰 Начислено: <b>${fmt(db.settings.refReward)}</b>`, { parse_mode: 'HTML' }); } catch {}
+      console.log(`💰 Выплата реферала: ${ref.id} <- ${uid} | ${db.settings.refReward}`);
+      adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${u.username||uid} открыл профиль`);
+      try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n💰 Начислено: <b>${fmt(db.settings.refReward)}</b>`, { parse_mode: 'HTML' }); } catch {}
     }
     u.pending_referral_id = null;
     db.users[String(uid)] = u; saveDB();
   }
 
-  const txt = `👤 <b>Ваш профиль</b>\n\n🆔 ID: <code>${u.id}</code>\n👤 Имя: ${u.first_name} ${u.username?`(@${u.username})`:'<i>не указано</i>'}\n💰 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n👥 Рефералов: <b>${u.referral_count||0}</b>`;
+  const txt = `👤 <b>Профиль</b>\n\n🆔 <code>${u.id}</code>\n💰 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n👥 Рефералов: <b>${u.referral_count||0}</b>`;
   return safeEdit(ctx, txt, kb.back());
 }));
 
-// ВВОД СУММЫ ВЫВОДА
-bot.callbackQuery('p_withdraw', async ctx => await requireSub(ctx, async () => {
-  await ack(ctx); const u = getUser(ctx.from.id); if(!u)return;
-  if(u.balance<db.settings.minWithdraw) return safeEdit(ctx, `💸 Мин: <code>${fmt(db.settings.minWithdraw)}</code>\n💰 У вас: <code>${fmt(u.balance)}</code>`, kb.back());
+// ОСТАЛЬНЫЕ ЭКРАНЫ
+wrap('p_main', (ctx, u) => safeEdit(ctx, `🌟 <b>Главное меню</b>\n💰 <code>${fmt(u.balance)}</code>\n🔗 <code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>`, kb.main(isAdmin(u.id))));
+wrap('p_balance', (ctx, u) => safeEdit(ctx, `💰 <b>Финансы</b>\n📊 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n📤 Выведено: <code>${fmt(u.totalSpent)}</code>`, kb.back()));
+wrap('p_ref', (ctx, u) => {
+  const list = (u.referral_list||[]).slice(0,10).map((id,i)=>{const r=getUser(id);return `${i+1}. ${r?.username?`@${r.username}`:`ID ${id}`} (${fmt(r?.balance||0)})`}).join('\n') || '📭 <i>Пока нет.</i>';
+  return safeEdit(ctx, `👥 <b>Рефералы</b>\n🔹 Всего: <b>${u.referral_count||0}</b>\n\n📋 Последние:\n${list}`, kb.back());
+});
+wrap('p_stats', (ctx) => { const st=getStats(); return safeEdit(ctx, `📊 <b>Статистика</b>\n👥 ${st.total}\n💰 ${fmt(st.balance)}\n🤝 ${st.totalRefs}`, kb.back()); });
+wrap('p_history', (ctx) => {
+  const t=db.transactions.filter(x=>x.user_id===ctx.from.id).slice(-8).reverse();
+  const m=t.length?t.map(x=>`▫️ <code>${x.type}</code> | <b>${x.amount>0?'+':''}${fmt(x.amount)}</b>`).join('\n'):'📭 Пусто.';
+  return safeEdit(ctx, `📜 <b>История</b>\n\n${m}`, kb.back());
+});
+wrap('p_withdraw', (ctx, u) => {
+  if(u.balance<db.settings.minWithdraw) return safeEdit(ctx, `💸 Мин: <code>${fmt(db.settings.minWithdraw)}</code>`, kb.back());
   userStates.set(ctx.from.id,{act:'wd'}); 
-  return safeEdit(ctx, `📤 Введите сумму (мин. <code>${fmt(db.settings.minWithdraw)}</code>):`, new InlineKeyboard().text('💸 Создать', 'p_wd_input').row().text('🔙 Назад','p_main'));
-}));
+  return safeEdit(ctx, `📤 Введите сумму (мин. <code>${fmt(db.settings.minWithdraw)}</code>):`, new InlineKeyboard().text('💸 Ввести', 'p_wd_input').row().text('🔙 Назад','p_main'));
+});
 bot.callbackQuery('p_wd_input', async ctx => { await ack(ctx); userStates.set(ctx.from.id,{act:'wd'}); return ctx.editMessageText(`📤 Введите сумму:`, {reply_markup:new InlineKeyboard().text('❌ Отмена','p_main'),parse_mode:'HTML'}); });
 
-// ==========================================
-// 7. АДМИН ПАНЕЛЬ
-// ==========================================
-bot.callbackQuery('a_main', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return ctx.answerCallbackQuery({text:'🔒',show_alert:true}); return safeEdit(ctx, `🛠 <b>Админ-панель</b>\n👥 ${getStats().total} | 💎 ${fmt(getStats().balance)}`, kb.adminMain()); });
+// АДМИНКА
+bot.callbackQuery('a_main', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return ctx.answerCallbackQuery({text:'🔒',show_alert:true}); return safeEdit(ctx, `🛠 <b>Админ</b>\n👥 ${getStats().total} | 💎 ${fmt(getStats().balance)}`, kb.adminMain()); });
 ['a_main','a_close'].forEach(id=>{ bot.callbackQuery(id, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.delete(ctx.from.id); if(id==='a_close')return safeEdit(ctx,'✅ Закрыто.',kb.main()); return safeEdit(ctx, `🛠 <b>Админ</b>`, kb.adminMain()); }); });
 bot.callbackQuery('a_search', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'search'}); return ctx.editMessageText('🔍 Введите ID:', {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
 bot.callbackQuery('a_wd', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const p=getPendingWithdrawals(); return safeEdit(ctx, p.length?`📋 Заявки: ${p.length}`:'📭 Нет заявок.', p.length?kb.adminMain():kb.backAdmin()); });
-bot.callbackQuery('a_broadcast', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'brd'}); return ctx.editMessageText('📢 Отправьте текст/фото. /admin для отмены.', {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
-bot.callbackQuery('a_settings', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'set_ref'}); return safeEdit(ctx, `⚙️ Награда: <b>${fmt(db.settings.refReward)}</b>\nВведите новое значение:`, kb.backAdmin()); });
+bot.callbackQuery('a_broadcast', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'brd'}); return ctx.editMessageText('📢 Отправьте текст. /admin отмена.', {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
+bot.callbackQuery('a_settings', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'set_ref'}); return safeEdit(ctx, `⚙️ Награда: <b>${fmt(db.settings.refReward)}</b>\nВведите новое:`, kb.backAdmin()); });
 
 const openAdminUser = async (ctx, uid) => {
   const u = getUser(uid); if(!u) return ctx.editMessageText(`❌ Не найден`, {parse_mode:'HTML'});
   const refs = (u.referral_list||[]).map((rid,i)=>{const r=getUser(rid);return `${i+1}. <code>${rid}</code> | ${r?.username?`@${r.username}`:'без ника'} | 💰${fmt(r?.balance||0)}`}).join('\n') || '📭 Нет.';
-  return safeEdit(ctx, `📊 <b>Профиль #${u.id}</b>\n💰 ${fmt(u.balance)} | 👥 ${u.referral_count||0} | 🚫 ${u.banned?'Бан':'Активен'}\n\n👥 Рефералы:\n${refs}`, kb.adminUser(u.id));
+  return safeEdit(ctx, `📊 <b>#${u.id}</b>\n💰 ${fmt(u.balance)} | 👥 ${u.referral_count||0} | 🚫 ${u.banned?'Бан':'Активен'}\n\n👥 Рефералы:\n${refs}`, kb.adminUser(u.id));
 };
 
-bot.callbackQuery('a_users', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const list=Object.values(db.users).slice(0,15).map((u,i)=>`${i+1}. <code>${u.id}</code> | ${u.username?`@${u.username}`:'Без ника'}`).join('\n')||'📭'; return safeEdit(ctx, `👥 Пользователи\n\n${list}`, kb.backAdmin()); });
-bot.callbackQuery(/^a_wd_view:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const id=parseInt(ctx.match[1],10); const wd=db.withdrawals[id]; if(!wd||wd.status!=='pending')return ctx.answerCallbackQuery({text:'❌',show_alert:true}); const u=getUser(wd.user_id); if(!u)return ctx.answerCallbackQuery({text:'❌',show_alert:true}); return safeEdit(ctx, `📤 Заявка #${id}\n💰 ${fmt(wd.amount)}\n👤 ${u.first_name} (@${u.username||u.id})`, kb.adminWd(id)); });
-bot.callbackQuery(/^a_wd_(ap|rj):(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const [,act,idStr]=ctx.match; const id=parseInt(idStr,10); const wd=db.withdrawals[id]; if(!wd||wd.status!=='pending')return ctx.answerCallbackQuery({text:'❌',show_alert:true}); if(act==='ap'){wd.status='approved';wd.comment='Одобрено';}else{wd.status='rejected';wd.comment='Отклонено';adjustBalance(wd.user_id,wd.amount,'wd_return',`Возврат #${id}`);}saveDB(); try{await bot.api.sendMessage(wd.user_id,`💰 Заявка #${id} ${act==='ap'?'✅ одобрена':'❌ отклонена'}.`,{parse_mode:'HTML'});}catch{} return ctx.editMessageText(`✅ #${id} обработана.`, {reply_markup:kb.adminMain(),parse_mode:'HTML'}); });
+bot.callbackQuery('a_users', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const list=Object.values(db.users).slice(0,15).map((u,i)=>`${i+1}. <code>${u.id}</code> | ${u.username?`@${u.username}`:'Без ника'}`).join('\n')||'📭'; return safeEdit(ctx, `👥 Юзеры\n\n${list}`, kb.backAdmin()); });
+bot.callbackQuery(/^a_wd_view:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const id=parseInt(ctx.match[1],10); const wd=db.withdrawals[id]; if(!wd||wd.status!=='pending')return ctx.answerCallbackQuery({text:'❌',show_alert:true}); const u=getUser(wd.user_id); if(!u)return ctx.answerCallbackQuery({text:'❌',show_alert:true}); return safeEdit(ctx, `📤 #${id}\n💰 ${fmt(wd.amount)}\n👤 ${u.first_name} (@${u.username||u.id})`, kb.adminWd(id)); });
+bot.callbackQuery(/^a_wd_(ap|rj):(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const [,act,idStr]=ctx.match; const id=parseInt(idStr,10); const wd=db.withdrawals[id]; if(!wd||wd.status!=='pending')return ctx.answerCallbackQuery({text:'❌',show_alert:true}); if(act==='ap'){wd.status='approved';wd.comment='Одобрено';}else{wd.status='rejected';wd.comment='Отклонено';adjustBalance(wd.user_id,wd.amount,'wd_return',`Возврат #${id}`);}saveDB(); try{await bot.api.sendMessage(wd.user_id,`💰 #${id} ${act==='ap'?'✅':'❌'}`,{parse_mode:'HTML'});}catch{} return ctx.editMessageText(`✅ #${id} обработана.`, {reply_markup:kb.adminMain(),parse_mode:'HTML'}); });
 
-bot.callbackQuery(/^a_bal:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:`a_bal:${ctx.match[1]}`}); return ctx.editMessageText(`💰 Введите сумму (+/-):`, {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
+bot.callbackQuery(/^a_bal:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:`a_bal:${ctx.match[1]}`}); return ctx.editMessageText(`💰 Сумма (+/-):`, {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
 bot.callbackQuery(/^a_ban:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const u=getUser(parseInt(ctx.match[1],10)); if(!u)return ctx.answerCallbackQuery({text:'❌',show_alert:true}); u.banned=!u.banned; db.users[String(u.id)]=u; saveDB(); await ctx.answerCallbackQuery({text:u.banned?'🚫 Бан':'✅ Разбан',show_alert:true}); return openAdminUser(ctx, u.id); });
 
-// ==========================================
-// 8. ОБРАБОТКА ТЕКСТА
-// ==========================================
+// ТЕКСТ
 bot.on('message:text', async ctx => {
   const uid=ctx.from.id; const txt=ctx.message.text.trim(); const st=userStates.get(uid);
   if(st?.act==='wd'){ 
@@ -328,15 +327,15 @@ bot.on('message:text', async ctx => {
     if(isNaN(amt)||amt<db.settings.minWithdraw||amt>u.balance) return ctx.reply(`❌ Мин: <code>${fmt(db.settings.minWithdraw)}</code>`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); 
     const id=db.nextWdId++; db.withdrawals[id]={id,user_id:uid,amount:amt,status:'pending',comment:'',created_at:Date.now()}; 
     adjustBalance(uid,-amt,'wd_pending',`Заявка #${id}`); userStates.delete(uid); saveDB(); 
-    return ctx.reply(`✅ Заявка #${id} создана`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); 
+    return ctx.reply(`✅ #${id} создана`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); 
   }
   if(!isAdmin(uid)) return;
-  if(txt==='/admin'){userStates.delete(uid); return ctx.editMessageText(`🛠 <b>Админ-панель</b>`, kb.adminMain()); }
+  if(txt==='/admin'){userStates.delete(uid); return ctx.editMessageText(`🛠 <b>Админ</b>`, kb.adminMain()); }
   if(!st) return;
   if(st.act==='search'){const id=parseInt(txt,10); if(isNaN(id)||!getUser(id))return ctx.reply('❌ Не найден',{parse_mode:'HTML'}); userStates.delete(uid); return openAdminUser(ctx,id); }
-  if(st.act==='set_ref'){const val=parseFloat(txt.replace(/\s/g,'')); if(isNaN(val)||val<0)return ctx.reply('❌ Число >= 0',{parse_mode:'HTML'}); db.settings.refReward=val; saveDB(); userStates.delete(uid); return ctx.reply(`✅ Награда: <code>${fmt(val)}</code>`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); }
+  if(st.act==='set_ref'){const val=parseFloat(txt.replace(/\s/g,'')); if(isNaN(val)||val<0)return ctx.reply('❌ >= 0',{parse_mode:'HTML'}); db.settings.refReward=val; saveDB(); userStates.delete(uid); return ctx.reply(`✅ Награда: <code>${fmt(val)}</code>`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); }
   if(st.act==='brd'){const users=Object.values(db.users); const msg=await ctx.reply(`📢 Рассылка... (${users.length})`,{parse_mode:'HTML'}); let s=0,f=0,b=0; for(let i=0;i<users.length;i++){try{await ctx.copyMessage(users[i].id);s++;}catch(e){e.description?.includes('blocked')?b++:f++;}if((i+1)%50===0)await ctx.api.editMessageText(msg.chat.id,msg.message_id,`📤 ${Math.round(((i+1)/users.length)*100)}% | ✅${s} ❌${f} 🚫${b}`,{parse_mode:'HTML'});await sleep(200);} userStates.delete(uid); await ctx.api.editMessageText(msg.chat.id,msg.message_id,`✅ Готово: ✅${s} ❌${f} 🚫${b}`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); return; }
-  if(/^a_bal:(\d+)$/.test(st.act)){const uidT=parseInt(st.act.split(':')[1],10); const amt=parseFloat(txt.replace(/\s/g,'')); if(isNaN(amt))return ctx.reply('❌ Введите число',{parse_mode:'HTML'}); adjustBalance(uidT,amt,'adm_balance',`Админ ${uid}`); userStates.delete(uid); const u=getUser(uidT); return ctx.reply(`✅ Изменено на ${amt>0?'+':''}${fmt(amt)}\n💰 Новый: <code>${fmt(u.balance)}</code>`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); }
+  if(/^a_bal:(\d+)$/.test(st.act)){const uidT=parseInt(st.act.split(':')[1],10); const amt=parseFloat(txt.replace(/\s/g,'')); if(isNaN(amt))return ctx.reply('❌ Число',{parse_mode:'HTML'}); adjustBalance(uidT,amt,'adm_balance',`Админ ${uid}`); userStates.delete(uid); const u=getUser(uidT); return ctx.reply(`✅ +${fmt(amt)}\n💰 <code>${fmt(u.balance)}</code>`,{reply_markup:kb.backAdmin(),parse_mode:'HTML'}); }
 });
 
 bot.catch((err, ctx) => { console.error(`❌ [Global] ${err.message}`); if(ctx) ctx.reply('⚠️ Ошибка.', { parse_mode: 'HTML' }).catch(()=>{}); });
