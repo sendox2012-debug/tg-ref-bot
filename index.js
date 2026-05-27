@@ -36,7 +36,6 @@ async function loadDB() {
     u.referral_list = u.referral_list || [];
     u.totalEarned = u.totalEarned || 0;
     u.totalSpent = u.totalSpent || 0;
-    u.sub_verified = u.sub_verified || false;
   }
   return db;
 }
@@ -80,12 +79,7 @@ const adjustBalance = (id, amount, type, desc) => {
 const getPendingWithdrawals = () => Object.values(db.withdrawals).filter(w => w.status === 'pending').sort((a,b) => b.created_at - a.created_at);
 const getStats = () => {
   const users = Object.values(db.users);
-  return { 
-    total: users.length, 
-    balance: users.reduce((s,u) => s + (u.balance||0), 0), 
-    pending: getPendingWithdrawals().length,
-    totalRefs: users.reduce((s,u) => s + (u.referral_count||0), 0)
-  };
+  return { total: users.length, balance: users.reduce((s,u) => s + (u.balance||0), 0), pending: getPendingWithdrawals().length, totalRefs: users.reduce((s,u) => s + (u.referral_count||0), 0) };
 };
 
 // ==========================================
@@ -114,7 +108,7 @@ const pf = {
 };
 
 // ==========================================
-// 4. КЛАВИАТУРЫ
+// 4. УТИЛИТЫ И ПРОВЕРКА ДОСТУПА (СТРОГАЯ)
 // ==========================================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmt = v => `${parseFloat(v||0).toLocaleString('ru-RU')} GRAM`;
@@ -126,13 +120,47 @@ const safeEdit = async (ctx, text, kb) => {
   catch (err) {
     if (err.description?.includes('not modified') || err.description?.includes('can\'t be edited')) {
       await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-    } else {
-      await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
-    }
+    } else await ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }).catch(()=>{});
   }
 };
 const ack = async ctx => { try { await ctx.answerCallbackQuery(); } catch {} };
 
+// 🔒 ГЛОБАЛЬНАЯ ПРОВЕРКА ПОДПИСКИ ПЕРЕД ЛЮБЫМ ДЕЙСТВИЕМ
+const requireSub = async (ctx, action) => {
+  const uid = ctx.from.id;
+  let isSubscribed = true;
+  let sponsors = null;
+
+  if (pf.enabled()) {
+    sponsors = await pf.getSponsors(uid, ctx.chat.id);
+    if (sponsors?.length) {
+      const res = await pf.checkSponsors(uid, sponsors.map(s => s.link));
+      isSubscribed = res?.every(r => r.status === 'subscribed') || false;
+    }
+  } else if (db.settings.REQUIRED_CHATS?.length > 0) {
+    for (const c of db.settings.REQUIRED_CHATS) {
+      try {
+        const chatId = c.startsWith('-100') ? parseInt(c, 10) : c.replace(/^@/, '');
+        const m = await ctx.api.getChatMember(chatId, uid);
+        if (!['member', 'administrator', 'creator'].includes(m.status)) isSubscribed = false;
+      } catch { isSubscribed = false; }
+    }
+  }
+
+  if (!isSubscribed) {
+    const links = sponsors?.length ? sponsors : db.settings.REQUIRED_CHATS;
+    const txt = `🔒 <b>Доступ ограничен</b>\n\nДля использования бота необходимо подписаться на спонсоров:\n${links.map((s,i)=>`🔹 ${i+1}. ${typeof s === 'string' ? s : s.link}`).join('\n')}`;
+    const k = new InlineKeyboard();
+    links.forEach(l => k.url(`📢 Подписаться`, typeof l === 'string' ? (l.startsWith('-100')?`https://t.me/c/${l.slice(4)}`:`https://t.me/${l.replace(/^@/,'')}`) : l.link).row());
+    k.text('✅ Проверить подписку', 'check_sponsors').row();
+    return ctx.reply(txt, { reply_markup: k, parse_mode: 'HTML' });
+  }
+  return action();
+};
+
+// ==========================================
+// 5. КЛАВИАТУРЫ
+// ==========================================
 const kb = {
   main: (isAdminUser) => {
     const k = new InlineKeyboard();
@@ -157,7 +185,7 @@ const kb = {
 };
 
 // ==========================================
-// 5. БОТ
+// 6. БОТ И ЗАПУСК
 // ==========================================
 const bot = new Bot(CONFIG.BOT_TOKEN);
 
@@ -177,156 +205,99 @@ async function startBotSafely() {
   }
 }
 
-// /START (ИСПРАВЛЕНА ЛОГИКА РЕФЕРАЛОВ)
-bot.command('start', async (ctx) => {
+// /START (с проверкой подписки)
+bot.command('start', async (ctx) => await requireSub(ctx, async () => {
   const uid = ctx.from.id; const uName = ctx.from.username; const fName = ctx.from.first_name || 'Участник';
   const refMatch = (ctx.message?.text||'').match(/ref_(\d+)/);
   let refId = refMatch ? parseInt(refMatch[1],10) : null;
   if (refId === uid) refId = null;
 
   let user = getUser(uid);
-
   if (!user) {
-    // 🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ
-    user = { id: uid, username: uName, first_name: fName, balance: 0, referrer_id: refId||null, pending_referral_id: refId||null, sub_verified: false, banned: false, totalEarned: 0, totalSpent: 0, created_at: Date.now(), lastActive: Date.now(), referral_count: 0, referral_list: [] };
-    db.users[String(uid)] = user;
-    saveDB(); // Мгновенная запись для критичных данных
+    user = { id: uid, username: uName, first_name: fName, balance: 0, referrer_id: refId||null, pending_referral_id: refId||null, banned: false, totalEarned: 0, totalSpent: 0, created_at: Date.now(), lastActive: Date.now(), referral_count: 0, referral_list: [] };
+    db.users[String(uid)] = user; saveDB();
 
     if (refId) {
       const ref = getUser(refId);
       if (ref) {
         ref.referral_count = (ref.referral_count || 0) + 1;
-        const list = ref.referral_list || [];
-        if (!list.includes(uid)) list.push(uid);
+        const list = ref.referral_list || []; if (!list.includes(uid)) list.push(uid);
         ref.referral_list = list.length > 50 ? list.slice(-50) : list;
-        db.users[String(refId)] = ref;
-        saveDB();
-        console.log(`🔗 Реферал записан: Пригласил ${refId} -> Новый ${uid}`);
-        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n📝 Ожидает проверки подписок.\n<i>Бонус начислится, когда реферал откроет /profile.</i>`, { parse_mode: 'HTML' }); } 
-        catch (e) { console.log(`🔕 Уведомление не доставлено: ${e.message}`); }
-      } else { console.log(`⚠️ Пригласитель ${refId} не найден в БД`); }
+        db.users[String(refId)] = ref; saveDB();
+        console.log(`🔗 Реферал: ${refId} -> ${uid}`);
+        try { await bot.api.sendMessage(refId, `🔔 <b>Новый переход!</b>\n👤 @${uName || uid}\n<i>Бонус начислится при открытии профиля.</i>`, { parse_mode: 'HTML' }); } catch {}
+      }
     }
   } else {
-    // 🔁 СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ
-    user.username = uName; user.first_name = fName;
-    db.users[String(uid)] = user;
-    saveDB();
-    return ctx.reply(`👋 <b>С возвращением, ${user.first_name}!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
-  }
-
-  const sponsors = pf.enabled() ? await pf.getSponsors(uid, ctx.chat.id) : null;
-  if (sponsors?.length) {
-    const txt = `🔒 <b>Для доступа подпишитесь на спонсоров</b>\n\n📋 Список (${sponsors.length}):\n${sponsors.map((s,i)=>`🔹 ${i+1}. ${s.link}`).join('\n')}\n\n⏳ После подписки нажмите кнопку проверки.`;
-    const k = new InlineKeyboard(); sponsors.forEach(s=>k.url(`📢 Подписаться`, s.link).row()); k.text('✅ Проверить подписку', 'check_sponsors').row();
-    return ctx.reply(txt, { reply_markup: k, parse_mode: 'HTML' });
-  }
-  if (db.settings.REQUIRED_CHATS?.length > 0) {
-    const k = new InlineKeyboard(); db.settings.REQUIRED_CHATS.forEach((c,i)=>k.url(`📢 ${i+1}`, c.startsWith('-100')?`https://t.me/c/${c.slice(4)}`:`https://t.me/${c.replace(/^@/,'')}`).row()); k.text('✅ Проверить подписку', 'check_subs').row();
-    return ctx.reply(`🔒 <b>Подпишитесь на спонсоров</b>`, { reply_markup: k, parse_mode: 'HTML' });
+    user.username = uName; user.first_name = fName; db.users[String(uid)] = user; saveDB();
   }
   return ctx.reply(`🌟 <b>Добро пожаловать в GRAM!</b>`, { reply_markup: kb.main(isAdmin(uid)), parse_mode: 'HTML' });
-});
+}));
 
-// ✅ ПРОВЕРКА ПОДПИСОК
-['check_sponsors', 'check_subs'].forEach(cb => {
-  bot.callbackQuery(cb, async ctx => {
-    await ack(ctx);
-    const uid = ctx.from.id;
-    let isSubscribed = false;
-    let failMessage = '';
-    let sponsorsToShow = null;
-
-    if (cb === 'check_sponsors') {
-      const sponsors = await pf.getSponsors(uid, ctx.chat.id);
-      sponsorsToShow = sponsors;
-      if (sponsors?.length) {
-        const results = await pf.checkSponsors(uid, sponsors.map(s => s.link));
-        if (results?.length) {
-          if (results.every(r => r.status === 'subscribed')) isSubscribed = true;
-          else if (results.some(r => r.status === 'unsubscribed')) failMessage = `⛔ Не подписаны на ${results.filter(r=>r.status==='unsubscribed').length} канал(а).`;
-          else if (results.some(r => r.status === 'not_counted')) failMessage = `⏳ Проверка не засчитана. Подождите 1-3 мин.`;
-          else failMessage = `❌ Проверка не пройдена.`;
-        } else failMessage = `❌ Ошибка сервера.`;
-      } else isSubscribed = true;
-    } else {
-      isSubscribed = true;
-      for (const c of db.settings.REQUIRED_CHATS || []) { try { if(!['member','administrator','creator'].includes((await ctx.api.getChatMember(c.startsWith('-100')?parseInt(c,10):c.replace(/^@/,''), uid)).status)) isSubscribed=false; } catch { isSubscribed=false; } }
-      if (!isSubscribed) failMessage = `⛔ Подписка не найдена.`;
-    }
-
-    if (isSubscribed) {
-      const user = getUser(uid);
-      user.sub_verified = true; // 🔑 КЛЮЧЕВОЙ ФЛАГ
-      db.users[String(uid)] = user;
-      saveDB();
-      console.log(`✅ Подписка подтверждена для ${uid}. Флаг sub_verified установлен.`);
-
-      await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 Перейдите в раздел "Профиль", чтобы активировать бонус пригласителя.`, {parse_mode:'HTML'});
-      await ctx.reply(`👋 <b>Главное меню:</b>`, {reply_markup: kb.main(isAdmin(uid)), parse_mode:'HTML'});
-    } else {
-      if (sponsorsToShow?.length) {
-        const k = new InlineKeyboard(); sponsorsToShow.forEach(s=>k.url(`📢 Подписаться`, s.link).row()); k.text('✅ Проверить подписку', 'check_sponsors').row();
-        return ctx.editMessageText(`🔒 Подпишитесь на спонсоров\n\n⚠️ ${failMessage}`, { reply_markup: k, parse_mode: 'HTML' });
-      }
-      await ctx.editMessageText(failMessage, {parse_mode:'HTML'});
-    }
+// ✅ ПРОВЕРКА ПОДПИСКИ (кнопка)
+bot.callbackQuery('check_sponsors', async (ctx) => {
+  await ack(ctx);
+  // Просто вызываем любую функцию с requireSub, она сама проверит и пустит дальше
+  await requireSub(ctx, async () => {
+    await ctx.editMessageText(`✅ <b>Подписка подтверждена!</b>\n\n🎉 Доступ к боту открыт.`, {parse_mode:'HTML'});
+    await ctx.reply(`👋 <b>Главное меню:</b>`, {reply_markup: kb.main(isAdmin(ctx.from.id)), parse_mode:'HTML'});
   });
 });
 
-// 🔑 ПРОФИЛЬ + НАЧИСЛЕНИЕ НАГРАДЫ
-bot.callbackQuery('p_profile', async ctx => {
+// ЭКРАНЫ ПОЛЬЗОВАТЕЛЯ (все через requireSub)
+const wrap = (id, fn) => bot.callbackQuery(id, async ctx => await requireSub(ctx, async () => {
+  await ack(ctx); const u = getUser(ctx.from.id);
+  if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
+  try { await fn(ctx, u); } catch { await ctx.reply('⚠️ Ошибка.', {reply_markup:kb.main(isAdmin(u.id)),parse_mode:'HTML'}); }
+}));
+
+wrap('p_main', (ctx, u) => safeEdit(ctx, `🌟 <b>Главное меню</b>\n💰 Баланс: <code>${fmt(u.balance)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>`, kb.main(isAdmin(u.id))));
+wrap('p_balance', (ctx, u) => safeEdit(ctx, `💰 <b>Финансы</b>\n📊 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n📤 Выведено: <code>${fmt(u.totalSpent)}</code>`, kb.back()));
+wrap('p_ref', (ctx, u) => {
+  const list = (u.referral_list||[]).slice(0,10).map((id,i)=>{const r=getUser(id);return `${i+1}. ${r?.username?`@${r.username}`:`ID ${id}`} (${fmt(r?.balance||0)})`}).join('\n') || '📭 <i>Пока нет.</i>';
+  return safeEdit(ctx, `👥 <b>Рефералы</b>\n🔹 Всего: <b>${u.referral_count||0}</b>\n💰 Награда: <b>${fmt(db.settings.refReward)}</b>\n\n📋 Последние:\n${list}`, kb.back());
+});
+wrap('p_stats', (ctx) => { const st=getStats(); return safeEdit(ctx, `📊 <b>Статистика бота</b>\n👥 Пользователей: <b>${st.total}</b>\n💰 В обороте: <b>${fmt(st.balance)}</b>\n🤝 Реф. связей: <b>${st.totalRefs}</b>`, kb.back()); });
+wrap('p_history', (ctx) => {
+  const t=db.transactions.filter(x=>x.user_id===ctx.from.id).slice(-8).reverse();
+  const m=t.length?t.map(x=>`▫️ <code>${x.type}</code> | <b>${x.amount>0?'+':''}${fmt(x.amount)}</b>`).join('\n'):'📭 Пусто.';
+  return safeEdit(ctx, `📜 <b>История</b>\n\n${m}`, kb.back());
+});
+
+// 🔑 ПРОФИЛЬ + НАЧИСЛЕНИЕ РЕФЕРАЛЬНОЙ НАГРАДЫ
+bot.callbackQuery('p_profile', async ctx => await requireSub(ctx, async () => {
   await ack(ctx);
-  const uid = ctx.from.id;
-  const u = getUser(uid);
+  const uid = ctx.from.id; const u = getUser(uid);
   if(!u) return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true});
 
-  console.log(`📂 Профиль открыт: ${uid} | pending_ref: ${u.pending_referral_id} | verified: ${u.sub_verified}`);
-
-  // 💰 НАЧИСЛЕНИЕ ТОЛЬКО ЗДЕСЬ
-  if (u.pending_referral_id && u.sub_verified) {
+  // 💰 НАЧИСЛЕНИЕ ТОЛЬКО ЗДЕСЬ (подписка гарантирована requireSub)
+  if (u.pending_referral_id) {
     const ref = getUser(u.pending_referral_id);
     if (ref) {
-      console.log(`💰 Выплата реферальной награды: ${ref.id} <- ${uid} | Сумма: ${db.settings.refReward}`);
+      console.log(`💰 Выплата: ${ref.id} <- ${uid} | ${db.settings.refReward}`);
       adjustBalance(ref.id, db.settings.refReward, 'referral_approved', `Реферал @${u.username||uid} подтвердил подписку`);
       try { await bot.api.sendMessage(ref.id, `✅ <b>Реферал активирован!</b>\n👤 @${u.username || uid}\n💰 Начислено: <b>${fmt(db.settings.refReward)}</b>`, { parse_mode: 'HTML' }); } catch {}
     }
     u.pending_referral_id = null;
-    u.sub_verified = false;
-    db.users[String(uid)] = u;
-    saveDB();
-    console.log(`🔄 Флаги сброшены для ${uid}`);
+    db.users[String(uid)] = u; saveDB();
   }
 
   const txt = `👤 <b>Ваш профиль</b>\n\n🆔 ID: <code>${u.id}</code>\n👤 Имя: ${u.first_name} ${u.username?`(@${u.username})`:'<i>не указано</i>'}\n💰 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n👥 Рефералов: <b>${u.referral_count||0}</b>`;
-  await safeEdit(ctx, txt, kb.back());
-});
+  return safeEdit(ctx, txt, kb.back());
+}));
 
-// Остальные экраны
-const screens = {
-  'p_main': (ctx, u) => safeEdit(ctx, `🌟 <b>Главное меню</b>\n💰 Баланс: <code>${fmt(u.balance)}</code>\n🔗 Ссылка:\n<code>https://t.me/${ctx.me.username}?start=ref_${u.id}</code>`, kb.main(isAdmin(u.id))),
-  'p_balance': (ctx, u) => safeEdit(ctx, `💰 <b>Финансы</b>\n📊 Баланс: <code>${fmt(u.balance)}</code>\n📈 Заработано: <code>${fmt(u.totalEarned)}</code>\n📤 Выведено: <code>${fmt(u.totalSpent)}</code>`, kb.back()),
-  'p_ref': (ctx, u) => {
-    const list = (u.referral_list||[]).slice(0,10).map((id,i)=>{const r=getUser(id);return `${i+1}. ${r?.username?`@${r.username}`:`ID ${id}`} (${fmt(r?.balance||0)})`}).join('\n') || '📭 <i>Пока нет.</i>';
-    return safeEdit(ctx, `👥 <b>Рефералы</b>\n🔹 Всего: <b>${u.referral_count||0}</b>\n💰 Награда: <b>${fmt(db.settings.refReward)}</b>\n\n📋 Последние:\n${list}`, kb.back());
-  },
-  'p_stats': (ctx) => { const st=getStats(); return safeEdit(ctx, `📊 <b>Статистика бота</b>\n👥 Пользователей: <b>${st.total}</b>\n💰 В обороте: <b>${fmt(st.balance)}</b>\n🤝 Реф. связей: <b>${st.totalRefs}</b>`, kb.back()); },
-  'p_withdraw': (ctx, u) => {
-    if(u.balance<db.settings.minWithdraw) return safeEdit(ctx, `💸 Мин: <code>${fmt(db.settings.minWithdraw)}</code>\n💰 У вас: <code>${fmt(u.balance)}</code>`, kb.back());
-    userStates.set(ctx.from.id,{act:'wd'}); return safeEdit(ctx, `📤 Введите сумму (мин. <code>${fmt(db.settings.minWithdraw)}</code>):`, new InlineKeyboard().text('💸 Создать', 'p_wd_input').row().text('🔙 Назад','p_main'));
-  },
-  'p_history': (ctx) => {
-    const t=db.transactions.filter(x=>x.user_id===ctx.from.id).slice(-8).reverse();
-    const m=t.length?t.map(x=>`▫️ <code>${x.type}</code> | <b>${x.amount>0?'+':''}${fmt(x.amount)}</b>`).join('\n'):'📭 Пусто.';
-    return safeEdit(ctx, `📜 <b>История</b>\n\n${m}`, kb.back());
-  }
-};
-Object.entries(screens).forEach(([id, fn]) => {
-  if(id!=='p_profile') bot.callbackQuery(id, async ctx => { await ack(ctx); const u=getUser(ctx.from.id); if(!u)return ctx.answerCallbackQuery({text:'⚠️ Сначала /start',show_alert:true}); try{await fn(ctx,u);}catch{await ctx.reply('⚠️ Ошибка.',{reply_markup:kb.main(isAdmin(u.id)),parse_mode:'HTML'});} });
-});
+// ВВОД СУММЫ ВЫВОДА
+bot.callbackQuery('p_withdraw', async ctx => await requireSub(ctx, async () => {
+  await ack(ctx); const u = getUser(ctx.from.id); if(!u)return;
+  if(u.balance<db.settings.minWithdraw) return safeEdit(ctx, `💸 Мин: <code>${fmt(db.settings.minWithdraw)}</code>\n💰 У вас: <code>${fmt(u.balance)}</code>`, kb.back());
+  userStates.set(ctx.from.id,{act:'wd'}); 
+  return safeEdit(ctx, `📤 Введите сумму (мин. <code>${fmt(db.settings.minWithdraw)}</code>):`, new InlineKeyboard().text('💸 Создать', 'p_wd_input').row().text('🔙 Назад','p_main'));
+}));
+bot.callbackQuery('p_wd_input', async ctx => { await ack(ctx); userStates.set(ctx.from.id,{act:'wd'}); return ctx.editMessageText(`📤 Введите сумму:`, {reply_markup:new InlineKeyboard().text('❌ Отмена','p_main'),parse_mode:'HTML'}); });
 
-bot.callbackQuery('p_wd_input', async ctx => { await ack(ctx); userStates.set(ctx.from.id,{act:'wd'}); return ctx.editMessageText(`📤 Введите сумму:\n(Мин: <code>${fmt(db.settings.minWithdraw)}</code>)`, {reply_markup:new InlineKeyboard().text('❌ Отмена','p_main'),parse_mode:'HTML'}); });
-
-// АДМИНКА
+// ==========================================
+// 7. АДМИН ПАНЕЛЬ
+// ==========================================
 bot.callbackQuery('a_main', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return ctx.answerCallbackQuery({text:'🔒',show_alert:true}); return safeEdit(ctx, `🛠 <b>Админ-панель</b>\n👥 ${getStats().total} | 💎 ${fmt(getStats().balance)}`, kb.adminMain()); });
 ['a_main','a_close'].forEach(id=>{ bot.callbackQuery(id, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.delete(ctx.from.id); if(id==='a_close')return safeEdit(ctx,'✅ Закрыто.',kb.main()); return safeEdit(ctx, `🛠 <b>Админ</b>`, kb.adminMain()); }); });
 bot.callbackQuery('a_search', async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:'search'}); return ctx.editMessageText('🔍 Введите ID:', {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
@@ -347,10 +318,18 @@ bot.callbackQuery(/^a_wd_(ap|rj):(\d+)$/, async ctx => { await ack(ctx); if(!isA
 bot.callbackQuery(/^a_bal:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; userStates.set(ctx.from.id,{act:`a_bal:${ctx.match[1]}`}); return ctx.editMessageText(`💰 Введите сумму (+/-):`, {reply_markup:kb.backAdmin(),parse_mode:'HTML'}); });
 bot.callbackQuery(/^a_ban:(\d+)$/, async ctx => { await ack(ctx); if(!isAdmin(ctx.from.id))return; const u=getUser(parseInt(ctx.match[1],10)); if(!u)return ctx.answerCallbackQuery({text:'❌',show_alert:true}); u.banned=!u.banned; db.users[String(u.id)]=u; saveDB(); await ctx.answerCallbackQuery({text:u.banned?'🚫 Бан':'✅ Разбан',show_alert:true}); return openAdminUser(ctx, u.id); });
 
-// ТЕКСТ
+// ==========================================
+// 8. ОБРАБОТКА ТЕКСТА
+// ==========================================
 bot.on('message:text', async ctx => {
   const uid=ctx.from.id; const txt=ctx.message.text.trim(); const st=userStates.get(uid);
-  if(st?.act==='wd'){ const u=getUser(uid); const amt=parseFloat(txt.replace(/\s/g,'')); if(isNaN(amt)||amt<db.settings.minWithdraw||amt>u.balance) return ctx.reply(`❌ Мин: <code>${fmt(db.settings.minWithdraw)}</code>`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); const id=db.nextWdId++; db.withdrawals[id]={id,user_id:uid,amount:amt,status:'pending',comment:'',created_at:Date.now()}; adjustBalance(uid,-amt,'wd_pending',`Заявка #${id}`); userStates.delete(uid); saveDB(); return ctx.reply(`✅ Заявка #${id} создана`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); }
+  if(st?.act==='wd'){ 
+    const u=getUser(uid); const amt=parseFloat(txt.replace(/\s/g,'')); 
+    if(isNaN(amt)||amt<db.settings.minWithdraw||amt>u.balance) return ctx.reply(`❌ Мин: <code>${fmt(db.settings.minWithdraw)}</code>`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); 
+    const id=db.nextWdId++; db.withdrawals[id]={id,user_id:uid,amount:amt,status:'pending',comment:'',created_at:Date.now()}; 
+    adjustBalance(uid,-amt,'wd_pending',`Заявка #${id}`); userStates.delete(uid); saveDB(); 
+    return ctx.reply(`✅ Заявка #${id} создана`,{reply_markup:kb.main(isAdmin(uid)),parse_mode:'HTML'}); 
+  }
   if(!isAdmin(uid)) return;
   if(txt==='/admin'){userStates.delete(uid); return ctx.editMessageText(`🛠 <b>Админ-панель</b>`, kb.adminMain()); }
   if(!st) return;
