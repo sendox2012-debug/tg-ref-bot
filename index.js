@@ -6,10 +6,10 @@ const path = require('path');
 // 1. КОНФИГУРАЦИЯ
 // ==========================================
 const CONFIG = {
-  BOT_TOKEN: '8859814892:AAHAq_JqxynxYifwOnF3rB3Tas8PakSVQIU',
+  BOT_TOKEN: 'token',
   ADMIN_IDS: [7295281658, 5137860558],
   DB_PATH: './data.json',
-  PIARFLOW_API_KEY: '-Fw-JokBjo-mmNfQsDyt82ZsKUXzSkE7',
+  PIARFLOW_API_KEY: 'вставь',
   PIARFLOW_BASE_URL: 'https://piarflow.ru/v1'
 };
 
